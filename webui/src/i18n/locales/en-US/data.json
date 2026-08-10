@@ -1,28 +1,52 @@
 {
   "dialog": {
-    "button": "PAYLOAD_MATRIX",
-    "title": "DATA_EXPLORER"
+    "button": "Data",
+    "title": "Data Browser"
   },
   "explorer": {
-    "title": "CAPTURED_PAYLOAD_MATRIX",
-    "records": "{{count}} RECORDS",
-    "rescan": "RESCAN",
-    "loading": "[LOADING] Scanning payload directory...",
-    "noData": "NO_DATA_CAPTURED",
-    "noDataHint": "Initialize crawler to begin data extraction sequence. Results will appear here upon completion.",
-    "allCategories": "ALL"
+    "title": "Data Files",
+    "records": "{{count}} records",
+    "rescan": "Rescan",
+    "loading": "Scanning the data directory...",
+    "noData": "No data yet",
+    "noDataHint": "Run a crawler task first. Collected results will appear here.",
+    "allCategories": "All",
+    "allTypes": "All types",
+    "categoryTitle": "Categories",
+    "searchPlaceholder": "Search by file name or path...",
+    "filteredRecords": "Showing {{count}} of {{total}}",
+    "noFilteredData": "No records match the current filters",
+    "categories": {
+      "all": "All Records",
+      "search": "Search Records",
+      "ranking": "Ranking Records",
+      "content": "Content Records",
+      "creators": "Creator Records",
+      "comments": "Comment Records",
+      "analysis": "Video Analysis",
+      "media": "Media & Downloads",
+      "other": "Other Files"
+    },
+    "sort": {
+      "modifiedDesc": "Newest first",
+      "modifiedAsc": "Oldest first",
+      "nameAsc": "Name A-Z",
+      "nameDesc": "Name Z-A",
+      "sizeDesc": "Largest files",
+      "recordsDesc": "Most records"
+    }
   },
   "file": {
     "entries": "{{count}} entries",
-    "extract": "EXTRACT",
-    "preview": "PREVIEW"
+    "extract": "Download",
+    "preview": "Preview"
   },
   "preview": {
     "title": "Data Preview",
-    "records": "{{count}} RECORDS",
-    "download": "DOWNLOAD",
-    "loading": "[LOADING] Decoding payload...",
-    "error": "[ERROR] Failed to decode payload",
+    "records": "{{count}} records",
+    "download": "Download",
+    "loading": "Parsing data...",
+    "error": "Failed to parse data",
     "searchPlaceholder": "Search in data...",
     "showing": "Showing {{filtered}} of {{total}} records"
   }

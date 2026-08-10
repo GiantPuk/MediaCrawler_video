@@ -20,14 +20,30 @@
 import sys
 import io
 
-# Force UTF-8 encoding for stdout/stderr to prevent encoding errors
-# when outputting Chinese characters in non-UTF-8 terminals
-if sys.stdout and hasattr(sys.stdout, 'buffer'):
-    if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-if sys.stderr and hasattr(sys.stderr, 'buffer'):
-    if sys.stderr.encoding and sys.stderr.encoding.lower() != 'utf-8':
-        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+
+def _force_utf8_stdio() -> None:
+    """Keep Windows consoles/pipes from crashing on emoji or other non-GBK text."""
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if not stream:
+            continue
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+            continue
+        except Exception:
+            pass
+        if hasattr(stream, "buffer"):
+            try:
+                setattr(
+                    sys,
+                    stream_name,
+                    io.TextIOWrapper(stream.buffer, encoding="utf-8", errors="replace"),
+                )
+            except Exception:
+                pass
+
+
+_force_utf8_stdio()
 
 import asyncio
 from typing import Optional, Type

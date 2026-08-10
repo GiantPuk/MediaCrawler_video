@@ -20,7 +20,7 @@ import asyncio
 import subprocess
 import signal
 import os
-from typing import Optional, List
+from typing import Any, Optional, List
 from datetime import datetime
 from pathlib import Path
 
@@ -43,6 +43,7 @@ class CrawlerManager:
         self._project_root = Path(__file__).parent.parent.parent
         # Log queue - for pushing to WebSocket
         self._log_queue: Optional[asyncio.Queue] = None
+        self._log_loop: Optional[asyncio.AbstractEventLoop] = None
 
     @property
     def logs(self) -> List[LogEntry]:
@@ -52,6 +53,10 @@ class CrawlerManager:
         """Get or create log queue"""
         if self._log_queue is None:
             self._log_queue = asyncio.Queue()
+        try:
+            self._log_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
         return self._log_queue
 
     def _create_log_entry(self, message: str, level: str = "info") -> LogEntry:
@@ -76,6 +81,22 @@ class CrawlerManager:
                 self._log_queue.put_nowait(entry)
             except asyncio.QueueFull:
                 pass
+
+    def publish_external_log(self, message: str, level: str = "info") -> None:
+        """Publish logs produced by auxiliary API tasks to the WebUI terminal."""
+        entry = self._create_log_entry(message, level)
+        if self._log_queue is None:
+            return
+        if self._log_loop and self._log_loop.is_running():
+            self._log_loop.call_soon_threadsafe(self._put_log_nowait, self._log_queue, entry)
+        else:
+            self._put_log_nowait(self._log_queue, entry)
+
+    def _put_log_nowait(self, queue: asyncio.Queue, entry: Any) -> None:
+        try:
+            queue.put_nowait(entry)
+        except asyncio.QueueFull:
+            pass
 
     def _parse_log_level(self, line: str) -> str:
         """Parse log level"""
@@ -125,9 +146,15 @@ class CrawlerManager:
                     stderr=subprocess.STDOUT,
                     text=True,
                     encoding='utf-8',
+                    errors='replace',
                     bufsize=1,
                     cwd=str(self._project_root),
-                    env={**os.environ, "PYTHONUNBUFFERED": "1"}
+                    env={
+                        **os.environ,
+                        "PYTHONUNBUFFERED": "1",
+                        "PYTHONIOENCODING": "utf-8",
+                        "PYTHONUTF8": "1",
+                    }
                 )
 
                 self.status = "running"

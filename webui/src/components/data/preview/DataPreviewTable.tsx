@@ -1,7 +1,6 @@
 import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Search } from 'lucide-react'
-import { ScrollArea } from '@/components/ui/scroll-area'
 import { Input } from '@/components/ui/input'
 
 interface DataPreviewTableProps {
@@ -54,8 +53,8 @@ export function DataPreviewTable({ data, columns: propColumns }: DataPreviewTabl
       </div>
 
       {/* 表格 */}
-      <ScrollArea className="flex-1 border border-cyber-border-DEFAULT rounded-lg">
-        <div className="min-w-full">
+      <div className="min-h-0 flex-1 overflow-auto rounded-lg border border-cyber-border-DEFAULT">
+        <div className="min-w-max">
           <table className="w-full text-xs font-mono">
             <thead className="sticky top-0 bg-cyber-bg-tertiary border-b border-cyber-border-DEFAULT">
               <tr>
@@ -80,7 +79,7 @@ export function DataPreviewTable({ data, columns: propColumns }: DataPreviewTabl
                   {columns.map((col) => (
                     <td
                       key={col}
-                      className="px-3 py-2 text-cyber-text-primary max-w-xs truncate"
+                      className="max-w-[28rem] whitespace-pre-wrap break-words px-3 py-2 align-top text-cyber-text-primary"
                       title={formatCellValue(row[col])}
                     >
                       {formatCellValue(row[col])}
@@ -91,7 +90,7 @@ export function DataPreviewTable({ data, columns: propColumns }: DataPreviewTabl
             </tbody>
           </table>
         </div>
-      </ScrollArea>
+      </div>
 
       {/* 过滤结果提示 */}
       {searchTerm && (

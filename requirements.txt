@@ -21,6 +21,7 @@ pandas==2.2.3
 aiosqlite==0.21.0
 pyhumps==3.8.0
 cryptography>=45.0.7
+dashscope>=1.24.6
 alembic>=1.16.5
 asyncmy>=0.2.10
 sqlalchemy>=2.0.43
@@ -29,3 +30,4 @@ openpyxl>=3.1.2
 pytest>=7.4.0
 pytest-asyncio>=0.21.0
 xhshow>=0.2.0
+oss2>=2.19.1

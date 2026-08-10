@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 # Copyright (c) 2025 relakkes@gmail.com
 #
 # This file is part of MediaCrawler project.
@@ -31,7 +31,7 @@ import config
 from base.base_crawler import AbstractApiClient
 from model.m_baidu_tieba import TiebaComment, TiebaCreator, TiebaNote
 from proxy.proxy_ip_pool import ProxyIpPool
-from tools import utils
+from tools import crawler_util, utils
 
 from .field import SearchNoteType, SearchSortType
 from .help import TieBaExtractor
@@ -503,7 +503,7 @@ class BaiduTieBaClient(AbstractApiClient):
                     comments, crawl_interval=crawl_interval, callback=callback
                 )
 
-                await asyncio.sleep(crawl_interval)
+                await crawler_util.random_crawl_sleep()
                 current_page += 1
 
             except Exception as e:
@@ -561,7 +561,7 @@ class BaiduTieBaClient(AbstractApiClient):
                     await self.playwright_page.goto(sub_comment_url, wait_until="domcontentloaded")
 
                     # Wait for page loading, using delay setting from config file
-                    await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
+                    await crawler_util.random_crawl_sleep()
 
                     # Get page HTML content
                     page_content = await self.playwright_page.content()
@@ -582,7 +582,7 @@ class BaiduTieBaClient(AbstractApiClient):
                         await callback(parment_comment.note_id, sub_comments)
 
                     all_sub_comments.extend(sub_comments)
-                    await asyncio.sleep(crawl_interval)
+                    await crawler_util.random_crawl_sleep()
                     current_page += 1
 
                 except Exception as e:
@@ -732,7 +732,7 @@ class BaiduTieBaClient(AbstractApiClient):
             await self.playwright_page.goto(creator_url, wait_until="domcontentloaded")
 
             # Wait for page loading, using delay setting from config file
-            await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
+            await crawler_util.random_crawl_sleep()
 
             # Get page content (this API returns JSON)
             page_content = await self.playwright_page.content()
@@ -802,7 +802,7 @@ class BaiduTieBaClient(AbstractApiClient):
             notes = await asyncio.gather(*note_detail_task)
             if callback:
                 await callback(notes)
-            await asyncio.sleep(crawl_interval)
+            await crawler_util.random_crawl_sleep()
             result.extend(notes)
             page_number += 1
             total_get_count += page_per_count
@@ -859,7 +859,8 @@ class BaiduTieBaClient(AbstractApiClient):
             if not has_more:
                 break
 
-            await asyncio.sleep(crawl_interval)
+            await crawler_util.random_crawl_sleep()
             page_number += 1
 
         return result
+

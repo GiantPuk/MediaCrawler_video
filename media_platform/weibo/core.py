@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 # Copyright (c) 2025 relakkes@gmail.com
 #
 # This file is part of MediaCrawler project.
@@ -24,7 +24,7 @@
 
 import asyncio
 import os
-# import random  # Removed as we now use fixed config.CRAWLER_MAX_SLEEP_SEC intervals
+# Randomized crawl sleeps are handled by tools.crawler_util
 from asyncio import Task
 from typing import Dict, List, Optional, Tuple
 
@@ -40,7 +40,7 @@ import config
 from base.base_crawler import AbstractCrawler
 from proxy.proxy_ip_pool import IpInfoModel, create_ip_pool
 from store import weibo as weibo_store
-from tools import utils
+from tools import crawler_util, utils
 from tools.cdp_browser import CDPBrowserManager
 from var import crawler_type_var, source_keyword_var
 
@@ -141,12 +141,14 @@ class WeiboCrawler(AbstractCrawler):
         """
         utils.logger.info("[WeiboCrawler.search] Begin search weibo keywords")
         weibo_limit_count = 10  # weibo limit page fixed value
-        if config.CRAWLER_MAX_NOTES_COUNT < weibo_limit_count:
-            config.CRAWLER_MAX_NOTES_COUNT = weibo_limit_count
+        requested_limit = max(1, config.CRAWLER_MAX_NOTES_COUNT)
+        max_count = max(requested_limit, weibo_limit_count)
         start_page = config.START_PAGE
 
         # Set the search type based on the configuration for weibo
-        if config.WEIBO_SEARCH_TYPE == "default":
+        if getattr(config, "CREATOR_VIDEO_ONLY", False):
+            search_type = SearchType.VIDEO
+        elif config.WEIBO_SEARCH_TYPE == "default":
             search_type = SearchType.DEFAULT
         elif config.WEIBO_SEARCH_TYPE == "real_time":
             search_type = SearchType.REAL_TIME
@@ -162,7 +164,8 @@ class WeiboCrawler(AbstractCrawler):
             source_keyword_var.set(keyword)
             utils.logger.info(f"[WeiboCrawler.search] Current search keyword: {keyword}")
             page = 1
-            while (page - start_page + 1) * weibo_limit_count <= config.CRAWLER_MAX_NOTES_COUNT:
+            processed_count = 0
+            while processed_count < requested_limit and (page - start_page + 1) * weibo_limit_count <= max_count:
                 if page < start_page:
                     utils.logger.info(f"[WeiboCrawler.search] Skip page: {page}")
                     page += 1
@@ -171,6 +174,8 @@ class WeiboCrawler(AbstractCrawler):
                 search_res = await self.wb_client.get_note_by_keyword(keyword=keyword, page=page, search_type=search_type)
                 note_id_list: List[str] = []
                 note_list = filter_search_result_card(search_res.get("cards"))
+                remaining = requested_limit - processed_count
+                note_list = note_list[:remaining]
                 # If full text fetching is enabled, batch get full text of posts
                 note_list = await self.batch_get_notes_full_text(note_list)
                 for note_item in note_list:
@@ -180,12 +185,12 @@ class WeiboCrawler(AbstractCrawler):
                             note_id_list.append(mblog.get("id"))
                             await weibo_store.update_weibo_note(note_item)
                             await self.get_note_images(mblog)
+                            processed_count += 1
 
                 page += 1
 
                 # Sleep after page navigation
-                await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
-                utils.logger.info(f"[WeiboCrawler.search] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds after page {page-1}")
+                await crawler_util.random_crawl_sleep()
 
                 await self.batch_get_notes_comments(note_id_list)
 
@@ -214,8 +219,7 @@ class WeiboCrawler(AbstractCrawler):
                 result = await self.wb_client.get_note_info_by_id(note_id)
 
                 # Sleep after fetching note details
-                await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
-                utils.logger.info(f"[WeiboCrawler.get_note_info_task] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds after fetching note details {note_id}")
+                await crawler_util.random_crawl_sleep()
 
                 return result
             except DataFetchError as ex:
@@ -255,12 +259,11 @@ class WeiboCrawler(AbstractCrawler):
                 utils.logger.info(f"[WeiboCrawler.get_note_comments] begin get note_id: {note_id} comments ...")
 
                 # Sleep before fetching comments
-                await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
-                utils.logger.info(f"[WeiboCrawler.get_note_comments] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds before fetching comments for note {note_id}")
+                await crawler_util.random_crawl_sleep()
 
                 await self.wb_client.get_note_all_comments(
                     note_id=note_id,
-                    crawl_interval=config.CRAWLER_MAX_SLEEP_SEC,  # Use fixed interval instead of random
+                    crawl_interval=config.CRAWLER_MAX_SLEEP_SEC,  # Use configured randomized crawling interval
                     callback=weibo_store.batch_update_weibo_note_comments,
                     max_count=config.CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES,
                 )
@@ -294,8 +297,7 @@ class WeiboCrawler(AbstractCrawler):
             if not url:
                 continue
             content = await self.wb_client.get_note_image(url)
-            await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
-            utils.logger.info(f"[WeiboCrawler.get_note_images] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds after fetching image")
+            await crawler_util.random_crawl_sleep()
             if content != None:
                 extension_file_name = url.split(".")[-1]
                 await weibo_store.update_weibo_note_image(pid, content, extension_file_name)
@@ -450,7 +452,7 @@ class WeiboCrawler(AbstractCrawler):
                 utils.logger.info(f"[WeiboCrawler.get_note_full_text] Successfully fetched full text for note: {note_id}")
 
             # Sleep after request to avoid rate limiting
-            await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
+            await crawler_util.random_crawl_sleep()
         except DataFetchError as ex:
             utils.logger.error(f"[WeiboCrawler.get_note_full_text] Failed to fetch full text for note {note_id}: {ex}")
         except Exception as ex:
@@ -482,3 +484,5 @@ class WeiboCrawler(AbstractCrawler):
         else:
             await self.browser_context.close()
         utils.logger.info("[WeiboCrawler.close] Browser context closed ...")
+
+

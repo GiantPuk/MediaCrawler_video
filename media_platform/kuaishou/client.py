@@ -21,6 +21,7 @@
 # -*- coding: utf-8 -*-
 import asyncio
 import json
+import random
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 from urllib.parse import urlencode
 
@@ -30,7 +31,7 @@ from playwright.async_api import BrowserContext, Page
 import config
 from base.base_crawler import AbstractApiClient
 from proxy.proxy_mixin import ProxyRefreshMixin
-from tools import utils
+from tools import crawler_util, utils
 from tools.httpx_util import make_async_client
 
 if TYPE_CHECKING:
@@ -38,6 +39,7 @@ if TYPE_CHECKING:
 
 from .exception import DataFetchError
 from .graphql import KuaiShouGraphQL
+from .help import get_ks_sign_from_playwright
 
 
 class KuaiShouClient(AbstractApiClient, ProxyRefreshMixin):
@@ -112,6 +114,40 @@ class KuaiShouClient(AbstractApiClient, ProxyRefreshMixin):
             raise DataFetchError(f"REST API V2 error: {result}")
         return result
 
+    async def request_rest_v2_signed(self, uri: str, data: dict) -> Dict:
+        max_retry = 3
+        result: Dict = {}
+        for attempt in range(max_retry):
+            await self._refresh_proxy_if_expired()
+            sign = await get_ks_sign_from_playwright(
+                self.playwright_page,
+                uri,
+                {"caver": 2},
+                data,
+            )
+            json_str = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
+            async with make_async_client(proxy=self.proxy) as client:
+                response = await client.request(
+                    method="POST",
+                    url=f"{self._rest_host}{uri}?__NS_hxfalcon={sign}&caver=2",
+                    data=json_str,
+                    timeout=self.timeout,
+                    headers=self.headers,
+                )
+            result = response.json()
+            if result.get("result") == 1:
+                return result
+            if result.get("result") == 2 and attempt < max_retry - 1:
+                delay = 5 * (2**attempt) + random.uniform(0, 2)
+                utils.logger.warning(
+                    f"[KuaiShouClient.request_rest_v2_signed] rate limited on {uri}, "
+                    f"retry in {delay:.1f}s, attempt {attempt + 1}/{max_retry}"
+                )
+                await asyncio.sleep(delay)
+                continue
+            raise DataFetchError(f"REST API V2 signed error: {result}")
+        raise DataFetchError(f"REST API V2 signed error: {result}")
+
     async def pong(self) -> bool:
         """get a note to check if login state is ok"""
         utils.logger.info("[KuaiShouClient.pong] Begin pong kuaishou...")
@@ -163,6 +199,17 @@ class KuaiShouClient(AbstractApiClient, ProxyRefreshMixin):
             "query": self.graphql.get("search_query"),
         }
         return await self.post("", post_data)
+
+    async def search_info_by_keyword_v2(
+        self, keyword: str, pcursor: str, search_session_id: str = ""
+    ) -> Dict:
+        post_data = {
+            "keyword": keyword,
+            "pcursor": pcursor,
+            "page": "search",
+            "searchSessionId": search_session_id,
+        }
+        return await self.request_rest_v2_signed("/rest/v/search/feed", post_data)
 
     async def get_video_info(self, photo_id: str) -> Dict:
         """
@@ -221,6 +268,10 @@ class KuaiShouClient(AbstractApiClient, ProxyRefreshMixin):
         }
         return await self.post("", post_data)
 
+    async def get_video_by_creater_v2(self, userId: str, pcursor: str = "") -> Dict:
+        post_data = {"user_id": userId, "pcursor": pcursor, "page": "profile"}
+        return await self.request_rest_v2_signed("/rest/v/profile/feed", post_data)
+
     async def get_video_all_comments(
         self,
         photo_id: str,
@@ -250,13 +301,12 @@ class KuaiShouClient(AbstractApiClient, ProxyRefreshMixin):
             if callback:  # If there is a callback function, execute the callback function
                 await callback(photo_id, comments)
             result.extend(comments)
-            await asyncio.sleep(crawl_interval)
+            await crawler_util.random_crawl_sleep()
             sub_comments = await self.get_comments_all_sub_comments(
                 comments, photo_id, crawl_interval, callback
             )
             result.extend(sub_comments)
         return result
-
     async def get_comments_all_sub_comments(
         self,
         comments: List[Dict],
@@ -304,7 +354,7 @@ class KuaiShouClient(AbstractApiClient, ProxyRefreshMixin):
 
                 if callback and sub_comments:
                     await callback(photo_id, sub_comments)
-                await asyncio.sleep(crawl_interval)
+                await crawler_util.random_crawl_sleep()
                 result.extend(sub_comments)
         return result
 
@@ -336,23 +386,27 @@ class KuaiShouClient(AbstractApiClient, ProxyRefreshMixin):
         pcursor = ""
 
         while pcursor != "no_more":
-            videos_res = await self.get_video_by_creater(user_id, pcursor)
+            videos_res = await self.get_video_by_creater_v2(user_id, pcursor)
             if not videos_res:
                 utils.logger.error(
                     f"[KuaiShouClient.get_all_videos_by_creator] The current creator may have been banned by ks, so they cannot access the data."
                 )
                 break
 
-            vision_profile_photo_list = videos_res.get("visionProfilePhotoList", {})
-            pcursor = vision_profile_photo_list.get("pcursor", "")
+            result_code = videos_res.get("result")
+            if result_code != 1:
+                raise DataFetchError(
+                    f"Kuaishou creator feed API returned business error result={result_code}, user_id={user_id}"
+                )
+            pcursor = videos_res.get("pcursor", "")
 
-            videos = vision_profile_photo_list.get("feeds", [])
+            videos = videos_res.get("feeds", [])
             utils.logger.info(
                 f"[KuaiShouClient.get_all_videos_by_creator] got user_id:{user_id} videos len : {len(videos)}"
             )
 
             if callback:
                 await callback(videos)
-            await asyncio.sleep(crawl_interval)
+            await crawler_util.random_crawl_sleep()
             result.extend(videos)
         return result

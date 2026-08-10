@@ -56,16 +56,22 @@ class DouYinLogin(AbstractLogin):
             The verification accuracy of the slider verification is not very good... If there are no special requirements, it is recommended not to use Douyin login, or use cookie login
         """
 
-        # popup login dialog
-        await self.popup_login_dialog()
-
         # select login type
-        if config.LOGIN_TYPE == "qrcode":
+        if config.LOGIN_TYPE == "cookie":
+            await self.login_by_cookies()
+            if not await self.has_login_state():
+                try:
+                    await self.context_page.goto("https://www.douyin.com/", wait_until="domcontentloaded", timeout=30000)
+                except PlaywrightTimeoutError:
+                    utils.logger.warning("[DouYinLogin.begin] Navigation timed out after cookie injection; continue to check cookies")
+        elif config.LOGIN_TYPE == "qrcode":
+            # popup login dialog
+            await self.popup_login_dialog()
             await self.login_by_qrcode()
         elif config.LOGIN_TYPE == "phone":
+            # popup login dialog
+            await self.popup_login_dialog()
             await self.login_by_mobile()
-        elif config.LOGIN_TYPE == "cookie":
-            await self.login_by_cookies()
         else:
             raise ValueError("[DouYinLogin.begin] Invalid Login Type Currently only supported qrcode or phone or cookie ...")
 
@@ -77,11 +83,15 @@ class DouYinLogin(AbstractLogin):
 
         # check login state
         utils.logger.info(f"[DouYinLogin.begin] login finished then check login state ...")
-        try:
-            await self.check_login_state()
-        except RetryError:
-            utils.logger.info("[DouYinLogin.begin] login failed please confirm ...")
-            sys.exit()
+        if config.LOGIN_TYPE == "cookie":
+            if not await self.has_login_state():
+                raise RuntimeError("Douyin cookie login failed: neither LOGIN_STATUS=1 nor sessionid+sid_guard was found after cookie injection.")
+        else:
+            try:
+                await self.check_login_state()
+            except RetryError:
+                utils.logger.info("[DouYinLogin.begin] login failed please confirm ...")
+                sys.exit()
 
         # wait for redirect
         wait_redirect_seconds = 5
@@ -91,6 +101,10 @@ class DouYinLogin(AbstractLogin):
     @retry(stop=stop_after_attempt(600), wait=wait_fixed(1), retry=retry_if_result(lambda value: value is False))
     async def check_login_state(self):
         """Check if the current login status is successful and return True otherwise return False"""
+        return await self.has_login_state()
+
+    async def has_login_state(self):
+        """Check login state once without retrying."""
         current_cookie = await self.browser_context.cookies()
         _, cookie_dict = utils.convert_cookies(current_cookie)
 
@@ -103,7 +117,10 @@ class DouYinLogin(AbstractLogin):
                 # utils.logger.warn(f"[DouYinLogin] check_login_state waring: {e}")
                 await asyncio.sleep(0.1)
 
-        if cookie_dict.get("LOGIN_STATUS") == "1":
+        if (
+            cookie_dict.get("LOGIN_STATUS") == "1"
+            or bool(cookie_dict.get("sessionid") and cookie_dict.get("sid_guard"))
+        ):
             return True
 
         return False
@@ -265,10 +282,16 @@ class DouYinLogin(AbstractLogin):
 
     async def login_by_cookies(self):
         utils.logger.info("[DouYinLogin.login_by_cookies] Begin login douyin by cookie ...")
-        for key, value in utils.convert_str_cookie_to_dict(self.cookie_str).items():
+        parsed_cookies = utils.convert_str_cookie_to_dict(self.cookie_str)
+        cookie_keys = sorted(parsed_cookies.keys())
+        utils.logger.info(
+            f"[DouYinLogin.login_by_cookies] Injecting {len(cookie_keys)} cookies, keys: {', '.join(cookie_keys)}"
+        )
+        for key, value in parsed_cookies.items():
             await self.browser_context.add_cookies([{
                 'name': key,
                 'value': value,
-                'domain': ".douyin.com",
-                'path': "/"
+                'url': "https://www.douyin.com/",
+                'secure': True,
+                'sameSite': "Lax",
             }])

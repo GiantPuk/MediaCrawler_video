@@ -46,6 +46,8 @@ const fileStyles: Record<string, { icon: string; border: string; badge: string }
 export function FileCard({ file }: FileCardProps) {
   const { t } = useTranslation('data')
   const [previewOpen, setPreviewOpen] = useState(false)
+  const category = file.category || 'other'
+  const platform = file.platform ? file.platform.toUpperCase() : ''
 
   const Icon = fileIcons[file.type] || FileText
   const styles = fileStyles[file.type] || {
@@ -86,6 +88,16 @@ export function FileCard({ file }: FileCardProps) {
               <p className="text-xs text-cyber-text-muted mt-1 font-mono">
                 {formatDateTime(file.modified_at)}
               </p>
+              <div className="mt-2 flex flex-wrap gap-1">
+                <Badge variant="outline" className="border-cyber-border-subtle bg-cyber-bg-tertiary text-[10px] text-cyber-text-secondary">
+                  {t(`explorer.categories.${category}`)}
+                </Badge>
+                {platform ? (
+                  <Badge variant="outline" className="border-cyber-neon-cyan/30 bg-cyber-neon-cyan/10 text-[10px] text-cyber-neon-cyan">
+                    {platform}
+                  </Badge>
+                ) : null}
+              </div>
             </div>
           </div>
 
@@ -93,12 +105,12 @@ export function FileCard({ file }: FileCardProps) {
             <Badge variant="outline" className={`text-[10px] font-mono ${styles.badge}`}>
               .{file.type.toUpperCase()}
             </Badge>
-            <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+            <div className="flex flex-wrap justify-end gap-1">
               {isPreviewable && (
                 <Button
                   variant="ghost"
                   size="sm"
-                  className="h-7 px-2 font-mono text-cyber-neon-cyan hover:text-cyber-neon-cyan hover:bg-cyber-neon-cyan/10"
+                  className="h-7 px-2 font-mono text-[11px] text-cyber-neon-cyan hover:text-cyber-neon-cyan hover:bg-cyber-neon-cyan/10"
                   onClick={() => setPreviewOpen(true)}
                 >
                   <Eye className="w-3 h-3 mr-1" />
@@ -108,7 +120,7 @@ export function FileCard({ file }: FileCardProps) {
               <Button
                 variant="ghost"
                 size="sm"
-                className="h-7 px-2 font-mono text-cyber-neon-cyan hover:text-cyber-neon-cyan hover:bg-cyber-neon-cyan/10"
+                className="h-7 px-2 font-mono text-[11px] text-cyber-neon-cyan hover:text-cyber-neon-cyan hover:bg-cyber-neon-cyan/10"
                 onClick={handleDownload}
               >
                 <Download className="w-3 h-3 mr-1" />

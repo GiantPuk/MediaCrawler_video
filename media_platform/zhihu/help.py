@@ -92,7 +92,7 @@ class ZhihuExtractor:
                 res.append(self._extract_answer_content(content))
             elif content.get("type") == zhihu_constant.ARTICLE_NAME:
                 res.append(self._extract_article_content(content))
-            elif content.get("type") == zhihu_constant.VIDEO_NAME:
+            elif content.get("type") in (zhihu_constant.VIDEO_NAME, "videoanswer"):
                 res.append(self._extract_zvideo_content(content))
             else:
                 continue
@@ -163,19 +163,26 @@ class ZhihuExtractor:
         """
         res = ZhihuContent()
         res.content_id = str(zvideo.get("id") or "")
-        res.content_type = zvideo.get("type")
+        raw_type = str(zvideo.get("type") or "")
+        res.content_type = zhihu_constant.VIDEO_NAME if raw_type == "videoanswer" else raw_type
 
         if "video" in zvideo and isinstance(zvideo.get("video"), dict): # This indicates data from the creator's homepage video list API
             res.content_url = f"{zhihu_constant.ZHIHU_URL}/zvideo/{res.content_id}"
             res.created_time = zvideo.get("published_at")
             res.updated_time = zvideo.get("updated_at")
         else:
-            res.content_url = zvideo.get("video_url")
-            res.created_time = zvideo.get("created_at")
-        res.title = extract_text_from_html(zvideo.get("title"))
-        res.desc = extract_text_from_html(zvideo.get("description"))
-        res.voteup_count = zvideo.get("voteup_count")
-        res.comment_count = zvideo.get("comment_count")
+            res.content_url = (
+                zvideo.get("video_url")
+                or zvideo.get("url")
+                or (f"{zhihu_constant.ZHIHU_URL}/zvideo/{res.content_id}" if res.content_id else "")
+            )
+            res.created_time = zvideo.get("created_at") or zvideo.get("created_time")
+            res.updated_time = zvideo.get("updated_at") or zvideo.get("updated_time") or res.created_time
+        res.title = extract_text_from_html(zvideo.get("title") or "")
+        res.desc = extract_text_from_html(zvideo.get("description") or zvideo.get("excerpt") or zvideo.get("content") or "")
+        res.content_text = res.desc
+        res.voteup_count = zvideo.get("voteup_count") or zvideo.get("like_count") or 0
+        res.comment_count = zvideo.get("comment_count") or 0
 
         # extract author info
         author_info = self._extract_content_or_comment_author(zvideo.get("author"))

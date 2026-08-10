@@ -28,12 +28,74 @@ router = APIRouter(prefix="/data", tags=["data"])
 
 # Data directory
 DATA_DIR = Path(__file__).parent.parent.parent / "data"
+PLATFORMS = ("xhs", "dy", "ks", "bili", "wb", "tieba", "zhihu")
+SENSITIVE_DATA_FILE_NAMES = {"platform_credentials.json", "qwen_settings.json"}
+
+
+def _normalized_rel_path(file_path: Path) -> str:
+    return str(file_path.relative_to(DATA_DIR)).replace("\\", "/")
+
+
+def infer_data_platform(rel_path: str) -> Optional[str]:
+    target = rel_path.lower()
+    parts = [part.lower() for part in rel_path.split("/") if part]
+    for platform in PLATFORMS:
+        if platform in parts or Path(target).name.startswith(f"{platform}_"):
+            return platform
+    aliases = {
+        "bilibili": "bili",
+        "douyin": "dy",
+        "kuaishou": "ks",
+        "weibo": "wb",
+    }
+    for alias, platform in aliases.items():
+        if alias in parts or Path(target).name.startswith(f"{alias}_"):
+            return platform
+    return None
+
+
+def infer_data_source_area(rel_path: str) -> str:
+    parts = [part.lower() for part in rel_path.split("/") if part]
+    if parts[:1] == ["video_tasks"]:
+        return "video_task"
+    if parts[:1] == ["media"]:
+        return "media"
+    return "crawler"
+
+
+def infer_data_category(file_path: Path, rel_path: str) -> str:
+    target = rel_path.lower()
+    name = file_path.name.lower()
+
+    if any(token in name for token in ("comment", "reply", "sub_comment")):
+        return "comments"
+    if any(token in name for token in ("search_contents", "direct_search", "keyword", "query")):
+        return "search"
+    if any(token in name for token in ("ranking_contents", "hot_search", "rank")):
+        return "ranking"
+    if any(token in name for token in ("creator_contents", "author", "user", "profile", "up_info", "account")):
+        return "creators"
+    if name == "result.json" or any(token in target for token in ("transcript", "subtitle", "summary", "analysis", "comparison", "status")):
+        return "analysis"
+    if target.startswith("video_tasks/") and "/raw/" not in target:
+        return "analysis"
+    if any(token in name for token in ("detail_contents", "contents", "note", "post", "article", "tweet", "weibo")):
+        return "content"
+    media_target = target.replace("video_tasks", "")
+    if any(token in media_target for token in ("media", "video", "image", "download", "cover", "audio")):
+        return "media"
+    return "other"
+
+
+def is_sensitive_data_file(file_path: Path) -> bool:
+    return file_path.name.lower() in SENSITIVE_DATA_FILE_NAMES
 
 
 def get_file_info(file_path: Path) -> dict:
     """Get file information"""
     stat = file_path.stat()
     record_count = None
+    rel_path = _normalized_rel_path(file_path)
 
     # Try to get record count
     try:
@@ -42,6 +104,14 @@ def get_file_info(file_path: Path) -> dict:
                 data = json.load(f)
                 if isinstance(data, list):
                     record_count = len(data)
+                elif isinstance(data, dict):
+                    for key in ("items", "records", "data", "comments", "contents"):
+                        value = data.get(key)
+                        if isinstance(value, list):
+                            record_count = len(value)
+                            break
+                    if record_count is None:
+                        record_count = 1
         elif file_path.suffix == ".csv":
             with open(file_path, "r", encoding="utf-8") as f:
                 record_count = sum(1 for _ in f) - 1  # Subtract header row
@@ -50,11 +120,14 @@ def get_file_info(file_path: Path) -> dict:
 
     return {
         "name": file_path.name,
-        "path": str(file_path.relative_to(DATA_DIR)),
+        "path": rel_path,
         "size": stat.st_size,
         "modified_at": stat.st_mtime,
         "record_count": record_count,
-        "type": file_path.suffix[1:] if file_path.suffix else "unknown"
+        "type": file_path.suffix[1:] if file_path.suffix else "unknown",
+        "category": infer_data_category(file_path, rel_path),
+        "source_area": infer_data_source_area(rel_path),
+        "platform": infer_data_platform(rel_path),
     }
 
 
@@ -73,10 +146,12 @@ async def list_data_files(platform: Optional[str] = None, file_type: Optional[st
             file_path = root_path / filename
             if file_path.suffix.lower() not in supported_extensions:
                 continue
+            if is_sensitive_data_file(file_path):
+                continue
 
             # Platform filter
             if platform:
-                rel_path = str(file_path.relative_to(DATA_DIR))
+                rel_path = _normalized_rel_path(file_path)
                 if platform.lower() not in rel_path.lower():
                     continue
 
@@ -105,6 +180,8 @@ async def get_file_content(file_path: str, preview: bool = True, limit: int = 10
 
     if not full_path.is_file():
         raise HTTPException(status_code=400, detail="Not a file")
+    if is_sensitive_data_file(full_path):
+        raise HTTPException(status_code=403, detail="Access denied")
 
     # Security check: ensure within DATA_DIR
     try:
@@ -173,6 +250,8 @@ async def download_file(file_path: str):
 
     if not full_path.is_file():
         raise HTTPException(status_code=400, detail="Not a file")
+    if is_sensitive_data_file(full_path):
+        raise HTTPException(status_code=403, detail="Access denied")
 
     # Security check
     try:
@@ -208,6 +287,8 @@ async def get_data_stats():
             file_path = root_path / filename
             if file_path.suffix.lower() not in supported_extensions:
                 continue
+            if is_sensitive_data_file(file_path):
+                continue
 
             try:
                 stat = file_path.stat()
@@ -219,11 +300,10 @@ async def get_data_stats():
                 stats["by_type"][file_type] = stats["by_type"].get(file_type, 0) + 1
 
                 # Statistics by platform (inferred from path)
-                rel_path = str(file_path.relative_to(DATA_DIR))
-                for platform in ["xhs", "dy", "ks", "bili", "wb", "tieba", "zhihu"]:
-                    if platform in rel_path.lower():
-                        stats["by_platform"][platform] = stats["by_platform"].get(platform, 0) + 1
-                        break
+                rel_path = _normalized_rel_path(file_path)
+                platform = infer_data_platform(rel_path)
+                if platform:
+                    stats["by_platform"][platform] = stats["by_platform"].get(platform, 0) + 1
             except Exception:
                 continue
 

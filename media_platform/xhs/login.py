@@ -214,8 +214,6 @@ class XiaoHongShuLogin(AbstractLogin):
         """login xiaohongshu website by cookies"""
         utils.logger.info("[XiaoHongShuLogin.login_by_cookies] Begin login xiaohongshu by cookie ...")
         for key, value in utils.convert_str_cookie_to_dict(self.cookie_str).items():
-            if key != "web_session":  # Only set web_session cookie attribute
-                continue
             await self.browser_context.add_cookies([{
                 'name': key,
                 'value': value,

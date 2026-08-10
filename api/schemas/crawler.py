@@ -102,3 +102,7 @@ class DataFileInfo(BaseModel):
     size: int
     modified_at: str
     record_count: Optional[int] = None
+    type: str = "unknown"
+    category: Optional[str] = None
+    source_area: Optional[str] = None
+    platform: Optional[str] = None

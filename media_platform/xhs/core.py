@@ -37,13 +37,13 @@ from base.base_crawler import AbstractCrawler
 from model.m_xiaohongshu import NoteUrlInfo, CreatorUrlInfo
 from proxy.proxy_ip_pool import IpInfoModel, create_ip_pool
 from store import xhs as xhs_store
-from tools import utils
+from tools import crawler_util, utils
 from tools.cdp_browser import CDPBrowserManager
 from var import crawler_type_var, source_keyword_var
 
 from .client import XiaoHongShuClient
 from .exception import DataFetchError, NoteNotFoundError
-from .field import SearchSortType
+from .field import SearchNoteType, SearchSortType
 from .help import parse_note_info_from_note_url, parse_creator_info_from_url, get_search_id
 from .login import XiaoHongShuLogin
 
@@ -130,6 +130,7 @@ class XiaoHongShuCrawler(AbstractCrawler):
         """Search for notes and retrieve their comment information."""
         utils.logger.info("[XiaoHongShuCrawler.search] Begin search Xiaohongshu keywords")
         xhs_limit_count = 20  # Xiaohongshu limit page fixed value
+        requested_limit = max(1, config.CRAWLER_MAX_NOTES_COUNT)
         if config.CRAWLER_MAX_NOTES_COUNT < xhs_limit_count:
             config.CRAWLER_MAX_NOTES_COUNT = xhs_limit_count
         start_page = config.START_PAGE
@@ -137,8 +138,11 @@ class XiaoHongShuCrawler(AbstractCrawler):
             source_keyword_var.set(keyword)
             utils.logger.info(f"[XiaoHongShuCrawler.search] Current search keyword: {keyword}")
             page = 1
+            processed_count = 0
             search_id = get_search_id()
             while (page - start_page + 1) * xhs_limit_count <= config.CRAWLER_MAX_NOTES_COUNT:
+                if processed_count >= requested_limit:
+                    break
                 if page < start_page:
                     utils.logger.info(f"[XiaoHongShuCrawler.search] Skip page {page}")
                     page += 1
@@ -153,19 +157,34 @@ class XiaoHongShuCrawler(AbstractCrawler):
                         search_id=search_id,
                         page=page,
                         sort=(SearchSortType(config.SORT_TYPE) if config.SORT_TYPE != "" else SearchSortType.GENERAL),
+                        note_type=SearchNoteType.VIDEO if getattr(config, "CREATOR_VIDEO_ONLY", False) else SearchNoteType.ALL,
                     )
-                    utils.logger.info(f"[XiaoHongShuCrawler.search] Search notes response: {notes_res}")
+                    raw_items = notes_res.get("items", []) if notes_res else []
+                    preview_titles = [
+                        str((item.get("note_card") or {}).get("display_title") or item.get("id") or "")[:40]
+                        for item in raw_items[:5]
+                    ]
+                    utils.logger.info(
+                        "[XiaoHongShuCrawler.search] Search notes response summary: "
+                        f"has_more={bool(notes_res and notes_res.get('has_more'))}, "
+                        f"items={len(raw_items)}, preview_titles={preview_titles}"
+                    )
                     if not notes_res or not notes_res.get("has_more", False):
                         utils.logger.info("[XiaoHongShuCrawler.search] No more content!")
                         break
                     semaphore = asyncio.Semaphore(config.MAX_CONCURRENCY_NUM)
+                    remaining = max(0, requested_limit - processed_count)
+                    page_items = [
+                        post_item for post_item in notes_res.get("items", {})
+                        if post_item.get("model_type") not in ("rec_query", "hot_query")
+                    ][:remaining]
                     task_list = [
                         self.get_note_detail_async_task(
                             note_id=post_item.get("id"),
                             xsec_source=post_item.get("xsec_source"),
                             xsec_token=post_item.get("xsec_token"),
                             semaphore=semaphore,
-                        ) for post_item in notes_res.get("items", {}) if post_item.get("model_type") not in ("rec_query", "hot_query")
+                        ) for post_item in page_items
                     ]
                     note_details = await asyncio.gather(*task_list)
                     for note_detail in note_details:
@@ -174,13 +193,16 @@ class XiaoHongShuCrawler(AbstractCrawler):
                             await self.get_notice_media(note_detail)
                             note_ids.append(note_detail.get("note_id"))
                             xsec_tokens.append(note_detail.get("xsec_token"))
+                            processed_count += 1
                     page += 1
-                    utils.logger.info(f"[XiaoHongShuCrawler.search] Note details: {note_details}")
+                    saved_note_ids = [str(note_detail.get("note_id") or "") for note_detail in note_details if note_detail]
+                    utils.logger.info(
+                        f"[XiaoHongShuCrawler.search] Note details summary: saved={len(saved_note_ids)}, note_ids={saved_note_ids[:10]}"
+                    )
                     await self.batch_get_note_comments(note_ids, xsec_tokens)
 
                     # Sleep after each page navigation
-                    await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
-                    utils.logger.info(f"[XiaoHongShuCrawler.search] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds after page {page-1}")
+                    await crawler_util.random_crawl_sleep()
                 except DataFetchError:
                     utils.logger.error("[XiaoHongShuCrawler.search] Get note detail error")
                     break
@@ -207,7 +229,7 @@ class XiaoHongShuCrawler(AbstractCrawler):
                 utils.logger.error(f"[XiaoHongShuCrawler.get_creators_and_notes] Failed to parse creator URL: {e}")
                 continue
 
-            # Use fixed crawling interval
+            # Use configured randomized crawling interval
             crawl_interval = config.CRAWLER_MAX_SLEEP_SEC
             # Get all note information of the creator
             all_notes_list = await self.xhs_client.get_all_notes_by_creator(
@@ -304,12 +326,34 @@ class XiaoHongShuCrawler(AbstractCrawler):
                     if not note_detail:
                         utils.logger.warning(f"[skip] Failed to get note detail, Id: {note_id}, 跳过继续")
                         return None
+                elif self._is_video_detail_without_video(note_detail):
+                    try:
+                        html_detail = await self.xhs_client.get_note_by_id_from_html(
+                            note_id,
+                            xsec_source,
+                            xsec_token,
+                            enable_cookie=True,
+                        )
+                        if html_detail and not self._is_video_detail_without_video(html_detail):
+                            utils.logger.info(
+                                f"[get_note_detail_async_task] API detail missed video stream, "
+                                f"using HTML detail for note_id: {note_id}"
+                            )
+                            note_detail = html_detail
+                        elif html_detail:
+                            utils.logger.warning(
+                                f"[get_note_detail_async_task] XHS detail for video note_id:{note_id} "
+                                "does not contain a downloadable video stream in API or HTML payload"
+                            )
+                    except Exception as html_ex:
+                        utils.logger.warning(
+                            f"[get_note_detail_async_task] HTML fallback failed for video note_id:{note_id}: {html_ex}"
+                        )
 
                 note_detail.update({"xsec_token": xsec_token, "xsec_source": xsec_source})
 
                 # Sleep after fetching note detail
-                await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
-                utils.logger.info(f"[get_note_detail_async_task] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds after fetching note {note_id}")
+                await crawler_util.random_crawl_sleep()
 
                 return note_detail
 
@@ -322,6 +366,12 @@ class XiaoHongShuCrawler(AbstractCrawler):
             except KeyError as ex:
                 utils.logger.error(f"[XiaoHongShuCrawler.get_note_detail_async_task] have not fund note detail note_id:{note_id}, err: {ex}")
                 return None
+
+    @staticmethod
+    def _is_video_detail_without_video(note_detail: Dict) -> bool:
+        if note_detail.get("type") != "video":
+            return False
+        return not xhs_store.get_video_url_arr(note_detail)
 
     async def batch_get_note_comments(self, note_list: List[str], xsec_tokens: List[str]):
         """Batch get note comments"""
@@ -344,7 +394,7 @@ class XiaoHongShuCrawler(AbstractCrawler):
         """Get note comments with keyword filtering and quantity limitation"""
         async with semaphore:
             utils.logger.info(f"[XiaoHongShuCrawler.get_comments] Begin get note id comments {note_id}")
-            # Use fixed crawling interval
+            # Use configured randomized crawling interval
             crawl_interval = config.CRAWLER_MAX_SLEEP_SEC
             await self.xhs_client.get_note_all_comments(
                 note_id=note_id,
@@ -355,8 +405,7 @@ class XiaoHongShuCrawler(AbstractCrawler):
             )
 
             # Sleep after fetching comments
-            await asyncio.sleep(crawl_interval)
-            utils.logger.info(f"[XiaoHongShuCrawler.get_comments] Sleeping for {crawl_interval} seconds after fetching comments for note {note_id}")
+            await crawler_util.random_crawl_sleep()
 
     async def create_xhs_client(self, httpx_proxy: Optional[str]) -> XiaoHongShuClient:
         """Create Xiaohongshu client"""

@@ -38,7 +38,7 @@ export function DataPreviewDialog({ file, open, onOpenChange }: DataPreviewDialo
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-6xl max-h-[85vh] flex flex-col">
+      <DialogContent className="flex h-[86vh] max-w-[min(1200px,96vw)] flex-col overflow-hidden">
         <DialogHeader className="flex-shrink-0">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
@@ -80,11 +80,17 @@ export function DataPreviewDialog({ file, open, onOpenChange }: DataPreviewDialo
                 {t('preview.error')}
               </div>
             </div>
-          ) : data ? (
+          ) : data && Array.isArray(data.data) ? (
             <DataPreviewTable
               data={data.data}
               columns={data.columns}
             />
+          ) : data ? (
+            <div className="h-full overflow-auto rounded-lg border border-cyber-border-DEFAULT bg-cyber-bg-tertiary/30">
+              <pre className="p-4 text-xs leading-relaxed font-mono text-cyber-text-primary whitespace-pre-wrap break-words">
+                {JSON.stringify(data.data, null, 2)}
+              </pre>
+            </div>
           ) : null}
         </div>
       </DialogContent>

@@ -10,7 +10,31 @@
     "loading": "[加载中] 正在扫描数据目录...",
     "noData": "暂无数据",
     "noDataHint": "启动爬虫开始数据采集，完成后结果将显示在此处。",
-    "allCategories": "全部"
+    "allCategories": "全部",
+    "allTypes": "全部类型",
+    "categoryTitle": "记录分类",
+    "searchPlaceholder": "按文件名或路径搜索记录...",
+    "filteredRecords": "显示 {{count}} / {{total}} 条",
+    "noFilteredData": "没有匹配当前筛选条件的记录",
+    "categories": {
+      "all": "全部记录",
+      "search": "搜索记录",
+      "ranking": "榜单记录",
+      "content": "内容记录",
+      "creators": "创作者记录",
+      "comments": "评论记录",
+      "analysis": "视频理解结果",
+      "media": "媒体与下载",
+      "other": "其他文件"
+    },
+    "sort": {
+      "modifiedDesc": "最近更新优先",
+      "modifiedAsc": "最早更新优先",
+      "nameAsc": "名称 A-Z",
+      "nameDesc": "名称 Z-A",
+      "sizeDesc": "文件大小优先",
+      "recordsDesc": "记录数优先"
+    }
   },
   "file": {
     "entries": "{{count}} 条",

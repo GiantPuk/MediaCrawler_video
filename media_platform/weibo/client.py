@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 # Copyright (c) 2025 relakkes@gmail.com
 #
 # This file is part of MediaCrawler project.
@@ -37,7 +37,7 @@ from tenacity import retry, stop_after_attempt, wait_fixed
 
 import config
 from proxy.proxy_mixin import ProxyRefreshMixin
-from tools import utils
+from tools import crawler_util, utils
 
 if TYPE_CHECKING:
     from proxy.proxy_ip_pool import ProxyIpPool
@@ -221,7 +221,7 @@ class WeiboClient(ProxyRefreshMixin):
                 comment_list = comment_list[:max_count - len(result)]
             if callback:  # If callback function exists, execute it
                 await callback(note_id, comment_list)
-            await asyncio.sleep(crawl_interval)
+            await crawler_util.random_crawl_sleep()
             result.extend(comment_list)
             sub_comment_result = await self.get_comments_all_sub_comments(note_id, comment_list, callback)
             result.extend(sub_comment_result)
@@ -406,8 +406,9 @@ class WeiboClient(ProxyRefreshMixin):
             notes = [note for note in notes if note.get("card_type") == 9]
             if callback:
                 await callback(notes)
-            await asyncio.sleep(crawl_interval)
+            await crawler_util.random_crawl_sleep()
             result.extend(notes)
             crawler_total_count += 10
             notes_has_more = notes_res.get("cardlistInfo", {}).get("total", 0) > crawler_total_count
         return result
+

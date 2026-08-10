@@ -113,7 +113,12 @@ class KuaishouLogin(AbstractLogin):
 
     async def login_by_cookies(self):
         utils.logger.info("[KuaishouLogin.login_by_cookies] Begin login kuaishou by cookie ...")
-        for key, value in utils.convert_str_cookie_to_dict(self.cookie_str).items():
+        parsed_cookies = utils.convert_str_cookie_to_dict(self.cookie_str)
+        cookie_keys = sorted(parsed_cookies.keys())
+        utils.logger.info(
+            f"[KuaishouLogin.login_by_cookies] Injecting {len(cookie_keys)} cookies, keys: {', '.join(cookie_keys)}"
+        )
+        for key, value in parsed_cookies.items():
             await self.browser_context.add_cookies([{
                 'name': key,
                 'value': value,

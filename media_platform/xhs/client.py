@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 # Copyright (c) 2025 relakkes@gmail.com
 #
 # This file is part of MediaCrawler project.
@@ -30,7 +30,7 @@ from tools.httpx_util import make_async_client
 import config
 from base.base_crawler import AbstractApiClient
 from proxy.proxy_mixin import ProxyRefreshMixin
-from tools import utils
+from tools import crawler_util, utils
 
 if TYPE_CHECKING:
     from proxy.proxy_ip_pool import ProxyIpPool
@@ -442,7 +442,7 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
                 comments = comments[: max_count - len(result)]
             if callback:
                 await callback(note_id, comments)
-            await asyncio.sleep(crawl_interval)
+            await crawler_util.random_crawl_sleep()
             result.extend(comments)
             sub_comments = await self.get_comments_all_sub_comments(
                 comments=comments,
@@ -517,7 +517,7 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
                         comments = comments_res["comments"]
                         if callback:
                             await callback(note_id, comments)
-                        await asyncio.sleep(crawl_interval)
+                        await crawler_util.random_crawl_sleep()
                         result.extend(comments)
                     except DataFetchError as e:
                         utils.logger.warning(
@@ -647,7 +647,7 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
                 await callback(notes_to_add)
 
             result.extend(notes_to_add)
-            await asyncio.sleep(crawl_interval)
+            await crawler_util.random_crawl_sleep()
 
         utils.logger.info(
             f"[XiaoHongShuClient.get_all_notes_by_creator] Finished getting notes for user {user_id}, total: {len(result)}"
@@ -702,3 +702,4 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
         )
 
         return self._extractor.extract_note_detail_from_html(note_id, html)
+

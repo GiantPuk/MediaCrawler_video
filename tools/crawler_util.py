@@ -23,8 +23,10 @@
 # @Time    : 2023/12/2 12:53
 # @Desc    : Crawler utility functions
 
+import asyncio
 import base64
 import json
+import logging
 import random
 import re
 import urllib
@@ -36,8 +38,87 @@ import httpx
 from PIL import Image, ImageDraw, ImageShow
 from playwright.async_api import BrowserContext, Cookie, Page
 
-from . import utils
+import config
 from .httpx_util import make_async_client
+
+
+logger = logging.getLogger("MediaCrawler")
+_crawl_sleep_counter = 0
+
+
+def _non_negative_float(value, fallback: float = 0.0) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = fallback
+    if number < 0:
+        return 0.0
+    return number
+
+
+def _non_negative_int(value, fallback: int = 0) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = fallback
+    if number < 0:
+        return 0
+    return number
+
+
+def _sleep_bounds() -> Tuple[float, float]:
+    min_sleep = _non_negative_float(
+        getattr(config, "CRAWLER_MIN_SLEEP_SEC", getattr(config, "CRAWLER_MAX_SLEEP_SEC", 0.0))
+    )
+    max_sleep = _non_negative_float(getattr(config, "CRAWLER_MAX_SLEEP_SEC", min_sleep), min_sleep)
+    if max_sleep < min_sleep:
+        min_sleep, max_sleep = max_sleep, min_sleep
+    return min_sleep, max_sleep
+
+
+def _long_pause_bounds() -> Tuple[float, float]:
+    min_pause = _non_negative_float(getattr(config, "CRAWLER_LONG_PAUSE_MIN_SEC", 0.0))
+    max_pause = _non_negative_float(getattr(config, "CRAWLER_LONG_PAUSE_MAX_SEC", min_pause), min_pause)
+    if max_pause < min_pause:
+        min_pause, max_pause = max_pause, min_pause
+    return min_pause, max_pause
+
+
+def next_crawl_sleep_seconds() -> Tuple[float, bool, int]:
+    """Return the next randomized crawl sleep delay, whether it includes a long pause, and the counter."""
+
+    global _crawl_sleep_counter
+
+    min_sleep, max_sleep = _sleep_bounds()
+    base_delay = random.uniform(min_sleep, max_sleep) if max_sleep > min_sleep else max_sleep
+
+    _crawl_sleep_counter += 1
+    sleep_count = _crawl_sleep_counter
+
+    long_pause_every = _non_negative_int(getattr(config, "CRAWLER_LONG_PAUSE_EVERY", 0))
+    has_long_pause = long_pause_every > 0 and sleep_count % long_pause_every == 0
+    if has_long_pause:
+        min_pause, max_pause = _long_pause_bounds()
+        long_delay = random.uniform(min_pause, max_pause) if max_pause > min_pause else max_pause
+        base_delay += long_delay
+
+    return max(0.0, base_delay), has_long_pause, sleep_count
+
+
+async def random_crawl_sleep(reason: str = "") -> float:
+    """Sleep using the configured randomized crawler interval."""
+
+    delay, has_long_pause, sleep_count = next_crawl_sleep_seconds()
+    if delay <= 0:
+        return 0.0
+
+    pause_kind = "long pause" if has_long_pause else "sleep"
+    suffix = f" after {reason}" if reason else ""
+    logger.info(
+        f"[CrawlerSleep] {pause_kind} {delay:.2f}s{suffix} (step {sleep_count})"
+    )
+    await asyncio.sleep(delay)
+    return delay
 
 
 async def find_login_qrcode(page: Page, selector: str) -> str:
@@ -49,7 +130,7 @@ async def find_login_qrcode(page: Page, selector: str) -> str:
         login_qrcode_img = str(await elements.get_property("src"))  # type: ignore
         if "http://" in login_qrcode_img or "https://" in login_qrcode_img:
             async with make_async_client(follow_redirects=True) as client:
-                utils.logger.info(f"[find_login_qrcode] get qrcode by url:{login_qrcode_img}")
+                logger.info(f"[find_login_qrcode] get qrcode by url:{login_qrcode_img}")
                 resp = await client.get(login_qrcode_img, headers={"User-Agent": get_user_agent()})
                 if resp.status_code == 200:
                     image_data = resp.content
@@ -156,22 +237,89 @@ async def convert_browser_context_cookies(
     return convert_cookies(cookies)
 
 
-def convert_str_cookie_to_dict(cookie_str: str) -> Dict:
+def normalize_cookie_input(cookie_str: str) -> str:
+    cookie_dict = parse_cookie_input(cookie_str)
+    return "; ".join(f"{name}={value}" for name, value in cookie_dict.items())
+
+
+def parse_cookie_input(cookie_str: str) -> Dict[str, str]:
     cookie_dict: Dict[str, str] = dict()
-    if not cookie_str:
+    text = (cookie_str or "").strip()
+    if not text:
         return cookie_dict
-    for cookie in cookie_str.split(";"):
+
+    json_cookie_dict = _parse_cookie_json(text)
+    if json_cookie_dict:
+        return json_cookie_dict
+
+    table_cookie_dict = _parse_cookie_table(text)
+    if table_cookie_dict:
+        return table_cookie_dict
+
+    cookie_header = _extract_cookie_header(text)
+    for cookie in cookie_header.split(";"):
         cookie = cookie.strip()
-        if not cookie:
+        if not cookie or "=" not in cookie:
             continue
-        cookie_list = cookie.split("=")
-        if len(cookie_list) != 2:
-            continue
-        cookie_value = cookie_list[1]
-        if isinstance(cookie_value, list):
-            cookie_value = "".join(cookie_value)
-        cookie_dict[cookie_list[0]] = cookie_value
+        cookie_name, cookie_value = cookie.split("=", 1)
+        cookie_name = cookie_name.strip()
+        cookie_value = cookie_value.strip()
+        if cookie_name:
+            cookie_dict[cookie_name] = cookie_value
     return cookie_dict
+
+
+def _parse_cookie_json(text: str) -> Dict[str, str]:
+    try:
+        data = json.loads(text)
+    except Exception:
+        return {}
+
+    cookie_dict: Dict[str, str] = {}
+    if isinstance(data, dict):
+        if isinstance(data.get("cookies"), list):
+            data = data["cookies"]
+        else:
+            for name, value in data.items():
+                if isinstance(value, (str, int, float, bool)):
+                    cookie_dict[str(name)] = str(value)
+            return cookie_dict
+
+    if isinstance(data, list):
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            value = item.get("value")
+            if name is not None and value is not None:
+                cookie_dict[str(name)] = str(value)
+    return cookie_dict
+
+
+def _parse_cookie_table(text: str) -> Dict[str, str]:
+    cookie_dict: Dict[str, str] = {}
+    for raw_line in text.splitlines():
+        columns = [part.strip() for part in raw_line.strip().split("\t")]
+        if len(columns) < 2:
+            continue
+        name, value = columns[0], columns[1]
+        if name.lower() == "name" and value.lower() == "value":
+            continue
+        if name and value:
+            cookie_dict[name] = value
+    return cookie_dict
+
+
+def _extract_cookie_header(text: str) -> str:
+    for line in text.splitlines():
+        match = re.search(r"(?i)\bcookie\s*:\s*(.+)$", line.strip())
+        if match:
+            return match.group(1).strip().strip("'\"")
+    return text.strip().strip("'\"")
+
+
+def convert_str_cookie_to_dict(cookie_str: str) -> Dict:
+    return parse_cookie_input(cookie_str)
 
 
 def match_interact_info_count(count_str: str) -> int:

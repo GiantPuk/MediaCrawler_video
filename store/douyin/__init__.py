@@ -155,10 +155,45 @@ def _extract_music_download_url(aweme_detail: Dict) -> str:
     return music_url
 
 
+def _first_present_value(data: Dict, keys: List[str]):
+    for key in keys:
+        value = data.get(key)
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def _duration_seconds_from_platform_value(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number <= 0:
+        return None
+    if number > 1000:
+        number = number / 1000
+    return round(number, 3)
+
+
 async def update_douyin_aweme(aweme_item: Dict):
     aweme_id = aweme_item.get("aweme_id")
     user_info = aweme_item.get("author", {})
     interact_info = aweme_item.get("statistics", {})
+    video_info = aweme_item.get("video", {})
+    play_count = _first_present_value(
+        interact_info,
+        [
+            "play_count",
+            "view_count",
+            "video_play_count",
+            "vv_count",
+            "vv",
+            "view",
+            "play",
+        ],
+    )
+    duration_raw = _first_present_value(video_info, ["duration", "duration_ms"])
+    duration_seconds = _duration_seconds_from_platform_value(duration_raw)
     save_content_item = {
         "aweme_id": aweme_id,
         "aweme_type": str(aweme_item.get("aweme_type")),
@@ -179,6 +214,12 @@ async def update_douyin_aweme(aweme_item: Dict):
         "note_download_url": ",".join(_extract_note_image_list(aweme_item)),
         "source_keyword": source_keyword_var.get(),
     }
+    if play_count is not None:
+        save_content_item["view_count"] = str(play_count)
+        save_content_item["play_count"] = str(play_count)
+    if duration_seconds is not None:
+        save_content_item["duration"] = duration_raw
+        save_content_item["duration_seconds"] = duration_seconds
     utils.logger.info(f"[store.douyin.update_douyin_aweme] douyin aweme id:{aweme_id}, title:{save_content_item.get('title')}")
     await DouyinStoreFactory.create_store().store_content(content_item=save_content_item)
 

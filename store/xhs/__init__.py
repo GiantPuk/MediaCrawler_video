@@ -85,6 +85,31 @@ def get_video_url_arr(note_item: Dict) -> List:
     return videoArr
 
 
+def _first_nested_value(data, paths):
+    for path in paths:
+        value = data
+        for key in path:
+            if not isinstance(value, dict):
+                value = None
+                break
+            value = value.get(key)
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def _duration_seconds_from_platform_value(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number <= 0:
+        return None
+    if number > 1000:
+        number = number / 1000
+    return round(number, 3)
+
+
 async def update_xhs_note(note_item: Dict):
     """
     Update Xiaohongshu note
@@ -105,6 +130,20 @@ async def update_xhs_note(note_item: Dict):
             img.update({'url': img.get('url_default')})
 
     video_url = ','.join(get_video_url_arr(note_item))
+    duration_raw = _first_nested_value(
+        note_item,
+        [
+            ("duration",),
+            ("video_duration",),
+            ("video", "duration"),
+            ("video", "duration_ms"),
+            ("video", "media", "duration"),
+            ("video", "media", "duration_ms"),
+            ("note_card", "video", "duration"),
+            ("note_card", "video", "duration_ms"),
+        ],
+    )
+    duration_seconds = _duration_seconds_from_platform_value(duration_raw)
 
     local_db_item = {
         "note_id": note_item.get("note_id"),  # Note ID
@@ -127,7 +166,15 @@ async def update_xhs_note(note_item: Dict):
         "source_keyword": source_keyword_var.get(),  # Search keyword
         "xsec_token": note_item.get("xsec_token"),  # xsec_token
     }
-    utils.logger.info(f"[store.xhs.update_xhs_note] xhs note: {local_db_item}")
+    if duration_seconds is not None:
+        local_db_item["duration"] = duration_raw
+        local_db_item["duration_seconds"] = duration_seconds
+    utils.logger.info(
+        "[store.xhs.update_xhs_note] "
+        f"xhs note id:{local_db_item.get('note_id')}, type:{local_db_item.get('type')}, "
+        f"title:{local_db_item.get('title')}, liked:{local_db_item.get('liked_count')}, "
+        f"comments:{local_db_item.get('comment_count')}"
+    )
     await XhsStoreFactory.create_store().store_content(local_db_item)
 
 

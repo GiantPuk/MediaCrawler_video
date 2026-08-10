@@ -223,6 +223,204 @@ uv run uvicorn api.main:app --port 8080 --reload
 
 </details>
 
+### 视频工作台与命令行调用
+
+本分支新增了视频检索、候选勾选、下载、Qwen-VL 总结归纳和配置管理能力。前端和命令行都复用同一个后端 API，不维护两套逻辑。
+
+#### 启动前后端
+
+```shell
+# 终端 1：启动后端 API
+uv run uvicorn api.main:app --host 127.0.0.1 --port 8080 --reload
+
+# 终端 2：启动前端
+cd webui
+npm install
+npm run dev
+```
+
+访问 `http://localhost:5173/` 打开 WebUI。若执行 `npm run build`，后端也可以直接在 `http://localhost:8080` 提供构建后的静态页面。
+
+长时间跑视频下载/总结时建议后端不带 `--reload` 启动，避免代码变更触发 reload 后丢失内存中的实时任务状态：
+
+```shell
+uv run uvicorn api.main:app --host 127.0.0.1 --port 8080
+```
+
+视频任务勾选“无头模式”时，后端会传入 `--headless true --enable_cdp_mode false --cdp_connect_existing false`，即不等待本机 Chrome 的 CDP 确认，改用标准 Playwright 无头浏览器。若需要复用已打开 Chrome 的反检测环境，请关闭无头模式并使用 CDP。
+
+#### 前端视频工作流
+
+- 标题/关键词搜索：选择平台和“标题/关键词”，输入关键词，点击“检索候选”，返回候选视频后勾选下载或下载并分析。
+- 作者搜索：选择“作者”，输入作者名、主页链接或 creator ID，先点击“搜索作者”。页面会先返回作者候选，包含头像、UID、粉丝数、视频数、认证/简介等真实返回信息。选中具体作者后，再点击“加载视频”或“加载选中作者视频”。
+- 重名作者：不会直接抓取多个重名账号；必须在候选作者里选定具体 UID 后才会加载视频。
+- 榜单：B 站 `popular` / `ranking`、分区排行榜、`precious` 入站必刷、`weekly` 每周必看返回可勾选的视频候选；B 站 `hot_search` 返回热搜词。快手 `hot` 返回短视频热榜 `photoId` 候选，后续直链下载取决于详情接口是否放行；抖音 `hot_search` / `trending`、微博 `hot_search` / `hot_gov`、知乎 `total` / `zvideo` 返回平台热搜、话题或问题榜单项，界面会提供“搜视频”；贴吧 `hot_topic` 返回热议话题榜，仅展示榜单项。它们都不会被伪装成可下载视频。
+- 设置：右上角“设置”管理平台 Cookie 档案和 Qwen/DashScope API 档案。列表默认只显示遮罩值，需要点击“加载明文”才会查看或编辑保存内容。
+- OSS 转存上传：在“设置 > 视频分析 API”里启用 OSS 后，下载好的本地视频会先上传到 OSS，再把签名 URL 传给 Qwen。`Auto` 上传后端会优先尝试源 URL 直给 Qwen，再尝试源站流式转存 OSS；失败后继续走已有本地下载、DashScope SDK / Base64 / 抽帧链路。当前默认分析是 `qwen3.5-omni-plus`，默认不启用 Whisper。
+- 扫码登录保存：在“设置 > 平台登录信息”选择平台后点击“扫码登录并保存”，后端会直接调用原 MediaCrawler 对应平台的 `login.py` 和持久化 Playwright 浏览器上下文。扫码成功后会保存 Cookie 档案，并记录 `browser_data/<platform>_user_data_dir` 目录；详细状态仍只进入底部系统控制台。
+
+#### 视频任务真实接入状态
+
+| 平台 | 标题/关键词视频搜索 | 作者候选搜索 | 作者视频 | 榜单 | 直接下载 | 总结归纳 |
+| --- | --- | --- | --- | --- | --- | --- |
+| B 站 | 已接入并实测通过 | 支持用户名候选，返回 UID/头像/粉丝/视频数 | 已接入并实测通过 | `popular` / `ranking` / `ranking_<region>` / `precious` / `weekly` / `hot_search` 已接入并实测通过；`weekly` 通常需要有效 Cookie | 已接入并实测通过 | 已接入并实测通过 |
+| 微博 | 保留原项目视频搜索路径；本轮未配置微博 Cookie，未做通过性声明 | 仅可靠支持主页链接或 UID | 依赖有效 Cookie 和原项目能力 | `hot_search` 已接入 `hot_band` 热搜词/话题榜；`hot_gov` 已接入官方热点；榜单项可继续作为关键词检索视频 | 有真实视频直链时可下载，当前未实测 | 有本地视频后可总结 |
+| 小红书 | 已用有效 Cookie 实测通过，可返回 `type=video` 候选 | 仅可靠支持主页链接或 creator ID | 依赖有效 Cookie | 未接入；探索页/homefeed 是推荐流，不作为榜单 | 候选可能不含直链；需要走原项目 detail/native 下载链路 | 有本地视频后可总结 |
+| 抖音 | 已用有效 Cookie/CDP 或标准模式实测通过，可返回视频候选和播放直链 | 仅可靠支持主页链接或 sec_user_id | 依赖有效 Cookie | `hot_search` / `trending` 已接入热搜词/话题榜；榜单项可继续作为关键词检索视频 | 有真实视频直链时可下载 | 有本地视频后可总结 |
+| 快手 | 已用有效 Cookie 实测通过，使用原项目签名搜索接口 | 仅可靠支持主页链接或 creator ID | 依赖有效 Cookie，已同步上游签名 REST profile feed | `hot` 已接入快手 brilliant 短视频热榜 photoId 候选；详情接口可能触发 captcha | 有真实视频直链时可下载，榜单候选若仅有 photoId 会明确标记后续下载不支持 | 有本地视频后可总结 |
+| 知乎 | 已用有效 Cookie 实测 `zvideo` 搜索通过；候选常为历史视频，注意日期范围 | 仅可靠支持主页链接或 creator ID | 已接入 zvideo feed，依赖有效 Cookie | `total` / `zvideo` 已接入 hot-lists 榜单；当前平台实际常返回问题卡，榜单项可继续作为关键词检索视频 | 未验证稳定直链下载 | 有本地视频后可总结 |
+| 贴吧 | 未接入真实视频搜索/下载流程 | 不适用于视频任务 | 不适用于视频任务 | `hot_topic` 已接入百度贴吧热议话题榜；仅展示榜单项，不进入视频下载 | 未接入 | 未接入 |
+
+#### 命令行调用视频功能
+
+命令行工具调用本地后端 API，所以需要先启动后端：
+
+```shell
+uv run uvicorn api.main:app --host 127.0.0.1 --port 8080 --reload
+```
+
+查看帮助：
+
+```shell
+uv run python tools/video_summary_cli.py --help
+uv run python tools/video_summary_cli.py tasks start --help
+```
+
+作者候选解析：
+
+```shell
+uv run python tools/video_summary_cli.py creators resolve --platform bili --query key725
+```
+
+按选中的作者 UID 只爬元数据：
+
+```shell
+uv run python tools/video_summary_cli.py tasks start ^
+  --platform bili ^
+  --source-mode creator ^
+  --creator-id 11332884 ^
+  --creator-name Key725 ^
+  --start-date 2026-08-07 ^
+  --end-date 2026-08-07 ^
+  --workflow-mode metadata_only ^
+  --max-videos 2 ^
+  --crawl-concurrency 1 ^
+  --login-type cookie ^
+  --headless ^
+  --crawl-min-sleep-seconds 5 ^
+  --crawl-max-sleep-seconds 10
+```
+
+`--crawl-concurrency` 会真实传给 MediaCrawler 的 `--max_concurrency_num`，取值 1-8。默认 1 最保守；调高会提升详情抓取吞吐，但账号和平台风控风险也会同步上升。
+
+对元数据任务中勾选的视频进行下载并总结：
+
+```shell
+uv run python tools/video_summary_cli.py tasks start ^
+  --platform bili ^
+  --source-mode creator ^
+  --workflow-mode selected_items ^
+  --source-task-id <metadata_task_id> ^
+  --selected-item-id <video_id_or_bvid> ^
+  --login-type cookie ^
+  --headless ^
+  --summarize
+```
+
+标题/关键词搜索和平台榜单：
+
+```shell
+uv run python tools/video_summary_cli.py tasks ranking-options
+uv run python tools/video_summary_cli.py tasks ranking-options --platform bili
+uv run python tools/video_summary_cli.py tasks start --platform bili --source-mode search --query "上海交通大学计算机夏令营" --workflow-mode metadata_only --credential-profile-id <bili_profile_id> --headless --crawl-min-sleep-seconds 5 --crawl-max-sleep-seconds 10
+uv run python tools/video_summary_cli.py tasks start --platform bili --source-mode ranking --ranking-type popular --ranking-limit 5 --workflow-mode metadata_only --credential-profile-id <bili_profile_id>
+uv run python tools/video_summary_cli.py tasks start --platform bili --source-mode ranking --ranking-type ranking_game --ranking-limit 5 --workflow-mode metadata_only --credential-profile-id <bili_profile_id>
+uv run python tools/video_summary_cli.py tasks start --platform bili --source-mode ranking --ranking-type precious --ranking-limit 5 --workflow-mode metadata_only --credential-profile-id <bili_profile_id>
+uv run python tools/video_summary_cli.py tasks start --platform bili --source-mode ranking --ranking-type weekly --ranking-limit 5 --workflow-mode metadata_only --credential-profile-id <bili_profile_id>
+uv run python tools/video_summary_cli.py tasks start --platform bili --source-mode ranking --ranking-type hot_search --ranking-limit 5 --workflow-mode metadata_only --credential-profile-id <bili_profile_id>
+uv run python tools/video_summary_cli.py tasks start --platform ks --source-mode ranking --ranking-type hot --ranking-limit 5 --workflow-mode metadata_only --credential-profile-id <ks_profile_id>
+uv run python tools/video_summary_cli.py tasks start --platform dy --source-mode ranking --ranking-type hot_search --ranking-limit 5 --workflow-mode metadata_only --credential-profile-id <dy_profile_id>
+uv run python tools/video_summary_cli.py tasks start --platform wb --source-mode ranking --ranking-type hot_search --ranking-limit 5 --workflow-mode metadata_only --credential-profile-id <wb_profile_id>
+uv run python tools/video_summary_cli.py tasks start --platform wb --source-mode ranking --ranking-type hot_gov --ranking-limit 5 --workflow-mode metadata_only --credential-profile-id <wb_profile_id>
+uv run python tools/video_summary_cli.py tasks start --platform tieba --source-mode ranking --ranking-type hot_topic --ranking-limit 5 --workflow-mode metadata_only
+uv run python tools/video_summary_cli.py tasks start --platform zhihu --source-mode ranking --ranking-type total --ranking-limit 5 --workflow-mode metadata_only --credential-profile-id <zhihu_profile_id>
+uv run python tools/video_summary_cli.py tasks start --platform dy --source-mode search --query "三角洲行动" --workflow-mode metadata_only --credential-profile-id <dy_profile_id> --headless --crawl-min-sleep-seconds 8 --crawl-max-sleep-seconds 15
+```
+
+查询、等待和停止任务：
+
+```shell
+uv run python tools/video_summary_cli.py tasks status <task_id>
+uv run python tools/video_summary_cli.py tasks wait <task_id>
+uv run python tools/video_summary_cli.py tasks stop <task_id>
+```
+
+平台 Cookie 档案管理：
+
+```shell
+uv run python tools/video_summary_cli.py credentials list
+uv run python tools/video_summary_cli.py credentials create --platform bili --name "bili-main" --cookies-file .\bili.cookie.txt
+uv run python tools/video_summary_cli.py credentials activate <credential_profile_id>
+uv run python tools/video_summary_cli.py credentials show <credential_profile_id>
+uv run python tools/video_summary_cli.py credentials update <credential_profile_id> --platform bili --name "bili-main" --cookies-file .\bili.cookie.txt
+uv run python tools/video_summary_cli.py credentials delete <credential_profile_id>
+```
+
+原 MediaCrawler 扫码登录并保存为平台 Cookie 档案：
+
+```shell
+# 启动后端后执行；浏览器由后端进程打开，扫码成功后自动保存 Cookie 和 browser_data 元信息
+uv run python tools/video_summary_cli.py credentials qrcode-login --platform bili --name "bili-qrcode"
+uv run python tools/video_summary_cli.py credentials qrcode-status <login_task_id>
+uv run python tools/video_summary_cli.py credentials qrcode-wait <login_task_id>
+```
+
+Qwen/DashScope 配置管理：
+
+```shell
+uv run python tools/video_summary_cli.py qwen list
+uv run python tools/video_summary_cli.py qwen create --name "dashscope-main" --api-key-file .\qwen.key.txt --model qwen3.5-omni-plus
+uv run python tools/video_summary_cli.py qwen activate <qwen_profile_id>
+uv run python tools/video_summary_cli.py qwen show <qwen_profile_id>
+uv run python tools/video_summary_cli.py qwen update <qwen_profile_id> --name "dashscope-main" --api-key-file .\qwen.key.txt --model qwen3.5-omni-plus
+uv run python tools/video_summary_cli.py qwen delete <qwen_profile_id>
+```
+
+启用 OSS 转存上传：
+
+```shell
+# 建议把密钥放在本地文本文件里，不要直接写进命令历史
+uv run python tools/video_summary_cli.py qwen update <qwen_profile_id> ^
+  --name "dashscope-main" ^
+  --api-key-file .\qwen.key.txt ^
+  --model qwen3.5-omni-plus ^
+  --oss-enabled ^
+  --oss-access-key-id-file .\oss-ak-id.txt ^
+  --oss-access-key-secret-file .\oss-ak-secret.txt ^
+  --oss-bucket <bucket_name> ^
+  --oss-endpoint oss-cn-beijing.aliyuncs.com ^
+  --oss-region cn-beijing ^
+  --oss-prefix mediacrawler/video-summary ^
+  --oss-url-expires-seconds 7200
+
+# 任务侧可以显式使用 OSS，也可以保留 auto 让后端按真实链路自动选择
+uv run python tools/video_summary_cli.py tasks start --platform bili --source-mode creator --workflow-mode selected_items --source-task-id <metadata_task_id> --selected-item-id <video_id_or_bvid> --summarize --video-upload-backend oss
+```
+
+说明：`--video-upload-backend auto` 的真实顺序是：未有本地视频时先尝试把平台源视频 URL 直接交给 Qwen；如果源 URL 对 Qwen 不公开且 OSS 已启用，则后端会使用平台请求头从源 URL 分块读取并 multipart 上传到 OSS，再把 OSS 签名 URL 交给 Qwen；这些真实链路失败后，才进入本地下载并走 OSS / DashScope SDK / Base64 / 抽帧链路。`oss` 显式模式仍表示“已有本地视频后上传 OSS”，不会伪造未接入平台的下载能力。
+
+测试当前 OSS + Qwen 大视频公网 URL 链路：
+
+```shell
+# 使用指定本地视频，上传到 OSS 后分别调用 Qwen-VL 和 Qwen-Omni
+uv run python tools/test_qwen_oss_video.py --video data\video_tasks\oss_public_test\vl_large_under20.mp4 --model qwen-vl-max --model qwen3.5-omni-plus
+
+# 不指定 --video 时，会选 data/video_tasks 下最大的 mp4；注意 qwen-vl-max 还受 20 分钟时长限制
+uv run python tools/test_qwen_oss_video.py
+```
+
+说明：B 站支持作者用户名搜索；其他平台目前只能可靠解析创作者主页链接或平台 creator ID。下载与总结是否可用取决于项目中对应平台已有的真实媒体下载链路，未接入的平台会返回明确的 unsupported 状态。
+
 <details>
 <summary>🔗 <strong>使用 Python 原生 venv 管理环境（不推荐）</strong></summary>
 

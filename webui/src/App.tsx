@@ -2,8 +2,7 @@ import { useState } from 'react'
 import { Toaster } from 'sonner'
 import { Sidebar } from '@/components/layout/Sidebar'
 import { MainContent } from '@/components/layout/MainContent'
-import { AuthorFooter } from '@/components/layout/AuthorFooter'
-import { CrawlerConfigPanel } from '@/components/config/CrawlerConfigPanel'
+import { VideoWorkspace } from '@/components/video/VideoWorkspace'
 import { EnvironmentCheck, isEnvChecked } from '@/components/env/EnvironmentCheck'
 import { LicenseDisclaimer, isLicenseAccepted } from '@/components/license/LicenseDisclaimer'
 
@@ -44,18 +43,14 @@ function App() {
       <Sidebar onShowDisclaimer={handleShowDisclaimer} />
 
       {/* Main Area */}
-      <div className="flex-1 flex flex-col gap-4 p-4 overflow-hidden min-h-0">
-        {/* Config Panel - Primary Action Area (Always Expanded) */}
+      <div className="flex-1 flex flex-col gap-4 p-4 overflow-y-auto min-h-0">
         <div className="flex-shrink-0">
-          <CrawlerConfigPanel />
+          <VideoWorkspace />
         </div>
 
-        {/* Console - Collapsible Terminal */}
+        {/* Console - the single shared system console */}
         <MainContent />
       </div>
-
-      {/* Author Footer */}
-      <AuthorFooter />
 
       {/* Toast notifications - Theme-aware style */}
       <Toaster

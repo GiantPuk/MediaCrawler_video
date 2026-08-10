@@ -21,7 +21,53 @@
 # -*- coding: utf-8 -*-
 
 import re
+
+from playwright.async_api import Page
+
 from model.m_kuaishou import VideoUrlInfo, CreatorUrlInfo
+
+
+# Kuaishou web REST endpoints require the page-provided __NS_hxfalcon
+# signature. Capture the in-page signer and call it from Playwright instead of
+# maintaining a separate signing implementation.
+KS_SIGN_CAPTURE_SCRIPT = """
+(() => {
+  if (window.__ks_realm) return;
+  let done = false;
+  const setter = function (v) {
+    if (!done && this && typeof this === "object" && this !== window &&
+        typeof this.$encode === "function" &&
+        typeof this.$getCatVersion === "function") {
+      done = true;
+      window.__ks_realm = this;
+      try { delete Object.prototype.caver; } catch (e) {}
+    }
+    Object.defineProperty(this, "caver", {
+      value: v, writable: true, enumerable: true, configurable: true,
+    });
+  };
+  try {
+    Object.defineProperty(Object.prototype, "caver", { set: setter, configurable: true });
+  } catch (e) {}
+})();
+"""
+
+
+async def get_ks_sign_from_playwright(page: Page, url: str, query: dict, body: dict) -> str:
+    try:
+        await page.wait_for_function("() => !!window.__ks_realm", timeout=15000)
+    except Exception:
+        await page.reload(wait_until="domcontentloaded")
+        await page.wait_for_function("() => !!window.__ks_realm", timeout=20000)
+    return await page.evaluate(
+        """([u, q, b]) => new Promise((resolve, reject) => {
+            window.__ks_realm.call('$encode', [
+                { url: u, query: q, form: {}, requestBody: b },
+                { suc: s => resolve(s), err: e => reject(new Error(String(e))) }
+            ]);
+        })""",
+        [url, query, body],
+    )
 
 
 def parse_video_info_from_url(url: str) -> VideoUrlInfo:

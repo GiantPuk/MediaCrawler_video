@@ -34,7 +34,7 @@ from base.base_crawler import AbstractApiClient
 from constant import zhihu as zhihu_constant
 from model.m_zhihu import ZhihuComment, ZhihuContent, ZhihuCreator
 from proxy.proxy_mixin import ProxyRefreshMixin
-from tools import utils
+from tools import crawler_util, utils
 
 if TYPE_CHECKING:
     from proxy.proxy_ip_pool import ProxyIpPool
@@ -225,7 +225,18 @@ class ZhiHuClient(AbstractApiClient, ProxyRefreshMixin):
             "vertical": note_type.value,
         }
         search_res = await self.get(uri, params)
-        utils.logger.info(f"[ZhiHuClient.get_note_by_keyword] Search result: {search_res}")
+        result_items = search_res.get("data", []) if isinstance(search_res, dict) else []
+        preview_titles = []
+        for item in result_items[:5]:
+            highlight = item.get("highlight") or {}
+            content = item.get("object") or {}
+            preview_titles.append(
+                str(highlight.get("title") or content.get("title") or content.get("id") or "")[:40]
+            )
+        utils.logger.info(
+            f"[ZhiHuClient.get_note_by_keyword] Search result summary: items={len(result_items)}, "
+            f"preview_titles={preview_titles}"
+        )
         return self._extractor.extract_contents_from_search(search_res)
 
     async def get_root_comments(
@@ -327,7 +338,7 @@ class ZhiHuClient(AbstractApiClient, ProxyRefreshMixin):
 
             result.extend(comments)
             await self.get_comments_all_sub_comments(content, comments, crawl_interval=crawl_interval, callback=callback)
-            await asyncio.sleep(crawl_interval)
+            await crawler_util.random_crawl_sleep()
         return result
 
     async def get_comments_all_sub_comments(
@@ -380,7 +391,7 @@ class ZhiHuClient(AbstractApiClient, ProxyRefreshMixin):
                     await callback(sub_comments)
 
                 all_sub_comments.extend(sub_comments)
-                await asyncio.sleep(crawl_interval)
+                await crawler_util.random_crawl_sleep()
         return all_sub_comments
 
     async def get_creator_info(self, url_token: str) -> Optional[ZhihuCreator]:
@@ -486,7 +497,7 @@ class ZhiHuClient(AbstractApiClient, ProxyRefreshMixin):
                 await callback(contents)
             all_contents.extend(contents)
             offset += limit
-            await asyncio.sleep(crawl_interval)
+            await crawler_util.random_crawl_sleep()
         return all_contents
 
     async def get_all_articles_by_creator(
@@ -520,7 +531,7 @@ class ZhiHuClient(AbstractApiClient, ProxyRefreshMixin):
                 await callback(contents)
             all_contents.extend(contents)
             offset += limit
-            await asyncio.sleep(crawl_interval)
+            await crawler_util.random_crawl_sleep()
         return all_contents
 
     async def get_all_videos_by_creator(
@@ -554,7 +565,7 @@ class ZhiHuClient(AbstractApiClient, ProxyRefreshMixin):
                 await callback(contents)
             all_contents.extend(contents)
             offset += limit
-            await asyncio.sleep(crawl_interval)
+            await crawler_util.random_crawl_sleep()
         return all_contents
 
     async def get_answer_info(

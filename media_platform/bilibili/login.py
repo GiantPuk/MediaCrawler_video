@@ -24,6 +24,7 @@
 # @Desc    : bilibili login implementation class
 
 import asyncio
+import base64
 import functools
 import sys
 from typing import Optional
@@ -80,19 +81,20 @@ class BilibiliLogin(AbstractLogin):
     async def login_by_qrcode(self):
         """login bilibili website and keep webdriver login state"""
         utils.logger.info("[BilibiliLogin.login_by_qrcode] Begin login bilibili by qrcode ...")
+        current_cookie = await self.browser_context.cookies()
+        _, cookie_dict = utils.convert_cookies(current_cookie)
+        if cookie_dict.get("SESSDATA", "") or cookie_dict.get("DedeUserID"):
+            utils.logger.info("[BilibiliLogin.login_by_qrcode] Browser context already has Bilibili login cookies")
+            return
 
-        # click login button
-        login_button_ele = self.context_page.locator(
-            "xpath=//div[@class='right-entry__outside go-login-btn']//div"
-        )
-        await login_button_ele.click()
+        clicked = await self._click_login_entry()
+        if not clicked:
+            utils.logger.warning(
+                "[BilibiliLogin.login_by_qrcode] Login entry was not found on homepage; opening passport login page"
+            )
+            await self.context_page.goto("https://passport.bilibili.com/login")
         await asyncio.sleep(1)
-        # find login qrcode
-        qrcode_img_selector = "//div[@class='login-scan-box']//img"
-        base64_qrcode_img = await utils.find_login_qrcode(
-            self.context_page,
-            selector=qrcode_img_selector
-        )
+        base64_qrcode_img = await self._find_qrcode_image()
         if not base64_qrcode_img:
             utils.logger.info("[BilibiliLogin.login_by_qrcode] login failed , have not found qrcode please check ....")
             sys.exit()
@@ -112,6 +114,51 @@ class BilibiliLogin(AbstractLogin):
         utils.logger.info(
             f"[BilibiliLogin.login_by_qrcode] Login successful then wait for {wait_redirect_seconds} seconds redirect ...")
         await asyncio.sleep(wait_redirect_seconds)
+
+    async def _click_login_entry(self) -> bool:
+        selectors = [
+            "css=.right-entry__outside.go-login-btn",
+            "css=.right-entry__outside.go-login-btn div",
+            "css=.header-login-entry",
+            "css=.login-entry",
+            "xpath=//*[contains(@class,'go-login-btn')]",
+            "xpath=//*[contains(@class,'header-login-entry')]",
+            "xpath=//*[normalize-space()='登录' or normalize-space()='立即登录']",
+        ]
+        for selector in selectors:
+            try:
+                locator = self.context_page.locator(selector).first
+                await locator.wait_for(state="visible", timeout=5000)
+                await locator.click(timeout=5000)
+                utils.logger.info(f"[BilibiliLogin.login_by_qrcode] Clicked login entry with selector: {selector}")
+                return True
+            except Exception:
+                continue
+        return False
+
+    async def _find_qrcode_image(self) -> str:
+        selectors = [
+            "xpath=//div[contains(@class,'login-scan-box')]//img",
+            "css=.login-scan-box img",
+            "css=.bili-mini-login-right-wp img",
+            "css=.login-scan-box canvas",
+            "css=canvas",
+        ]
+        for selector in selectors:
+            try:
+                element = await self.context_page.wait_for_selector(selector, timeout=5000)
+                if not element:
+                    continue
+                if selector.endswith("canvas") or selector == "css=canvas":
+                    screenshot = await element.screenshot()
+                    return base64.b64encode(screenshot).decode("utf-8")
+                qrcode = await utils.find_login_qrcode(self.context_page, selector=selector)
+                if qrcode:
+                    utils.logger.info(f"[BilibiliLogin.login_by_qrcode] Found qrcode with selector: {selector}")
+                    return qrcode
+            except Exception:
+                continue
+        return ""
 
     async def login_by_mobile(self):
         pass

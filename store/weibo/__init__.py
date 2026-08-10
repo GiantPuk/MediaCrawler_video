@@ -23,13 +23,57 @@
 # @Desc    :
 
 import re
-from typing import List
+from typing import Any, Dict, List
 
 from tools.user_hash import anonymize_user_id, mask_nickname
 from var import source_keyword_var
 
 from .weibo_store_media import *
 from ._store_impl import *
+
+
+def _collect_weibo_video_urls(value: Any) -> List[str]:
+    urls: List[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_text = str(key).lower()
+            if isinstance(item, str) and item.startswith(("http://", "https://")):
+                if "url" in key_text and ".mp4" in item.lower():
+                    urls.append(item)
+            elif isinstance(item, (dict, list)):
+                urls.extend(_collect_weibo_video_urls(item))
+    elif isinstance(value, list):
+        for item in value:
+            urls.extend(_collect_weibo_video_urls(item))
+    return list(dict.fromkeys(urls))
+
+
+def _extract_weibo_video_metadata(mblog: Dict) -> Dict[str, Any]:
+    page_info = mblog.get("page_info") or {}
+    media_info = page_info.get("media_info") or {}
+    video_urls = _collect_weibo_video_urls(page_info)
+    is_video = (
+        getattr(config, "CREATOR_VIDEO_ONLY", False)
+        or str(page_info.get("type") or "").lower() == "video"
+        or bool(media_info)
+        or bool(video_urls)
+    )
+    result: Dict[str, Any] = {
+        "is_video": bool(is_video),
+    }
+    if video_urls:
+        result["video_download_url"] = video_urls
+        result["video_url"] = video_urls[0]
+    if page_info.get("page_url"):
+        result["video_page_url"] = page_info.get("page_url")
+    page_pic = page_info.get("page_pic") or page_info.get("page_pic_url")
+    if isinstance(page_pic, dict):
+        page_pic = page_pic.get("url")
+    if page_pic:
+        result["video_cover_url"] = page_pic
+    if media_info.get("duration"):
+        result["video_duration"] = media_info.get("duration")
+    return result
 
 
 class WeibostoreFactory:
@@ -103,6 +147,7 @@ async def update_weibo_note(note_item: Dict):
         "nickname": mask_nickname(user_info.get("screen_name", "")),
         "source_keyword": source_keyword_var.get(),
     }
+    save_content_item.update(_extract_weibo_video_metadata(mblog))
     utils.logger.info(f"[store.weibo.update_weibo_note] weibo note id:{note_id}, title:{save_content_item.get('content')[:24]} ...")
     await WeibostoreFactory.create_store().store_content(content_item=save_content_item)
 

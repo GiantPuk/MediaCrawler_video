@@ -35,6 +35,9 @@ export interface DataFile {
   modified_at: number
   record_count: number | null
   type: string
+  category?: string | null
+  source_area?: string | null
+  platform?: string | null
 }
 
 export interface Platform {

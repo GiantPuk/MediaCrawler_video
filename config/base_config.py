@@ -107,6 +107,9 @@ MAX_CONCURRENCY_NUM = 1
 # Whether to enable crawling media mode (including image or video resources), crawling media is not enabled by default
 ENABLE_GET_MEIDAS = False
 
+# Used by the WebUI video summary task. Keep regular creator mode behavior unchanged by default.
+CREATOR_VIDEO_ONLY = False
+
 # Whether to enable comment crawling mode. Comment crawling is enabled by default.
 ENABLE_GET_COMMENTS = True
 
@@ -134,7 +137,16 @@ STOP_WORDS_FILE = "./docs/hit_stopwords.txt"
 FONT_PATH = "./docs/STZHONGS.TTF"
 
 # Crawl interval
+# If min and max are the same, crawler sleeps a fixed interval. Set different
+# values to randomize each crawl wait inside [min, max].
+CRAWLER_MIN_SLEEP_SEC = 2
 CRAWLER_MAX_SLEEP_SEC = 2
+
+# Long pause policy. 0 disables long pauses. When enabled, every N crawl waits
+# add one extra randomized pause inside [min, max].
+CRAWLER_LONG_PAUSE_EVERY = 0
+CRAWLER_LONG_PAUSE_MIN_SEC = 30
+CRAWLER_LONG_PAUSE_MAX_SEC = 90
 
 # 是否禁用 SSL 证书验证。仅在使用企业代理、Burp Suite、mitmproxy 等会注入自签名证书的中间人代理时设为 True。
 # 警告：禁用 SSL 验证将使所有流量暴露于中间人攻击风险，请勿在生产环境中开启。

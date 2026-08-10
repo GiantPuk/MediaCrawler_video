@@ -20,7 +20,7 @@
 
 import asyncio
 import os
-# import random  # Removed as we now use fixed config.CRAWLER_MAX_SLEEP_SEC intervals
+# Randomized crawl sleeps are handled by tools.crawler_util
 import time
 from asyncio import Task
 from typing import Dict, List, Optional, Tuple
@@ -28,6 +28,7 @@ from typing import Dict, List, Optional, Tuple
 from playwright.async_api import (
     BrowserContext,
     BrowserType,
+    Error as PlaywrightError,
     Page,
     Playwright,
     async_playwright,
@@ -38,13 +39,13 @@ from base.base_crawler import AbstractCrawler
 from model.m_kuaishou import VideoUrlInfo, CreatorUrlInfo
 from proxy.proxy_ip_pool import IpInfoModel, create_ip_pool
 from store import kuaishou as kuaishou_store
-from tools import utils
+from tools import crawler_util, utils
 from tools.cdp_browser import CDPBrowserManager
 from var import comment_tasks_var, crawler_type_var, source_keyword_var
 
 from .client import KuaiShouClient
 from .exception import DataFetchError
-from .help import parse_video_info_from_url, parse_creator_info_from_url
+from .help import KS_SIGN_CAPTURE_SCRIPT, parse_video_info_from_url, parse_creator_info_from_url
 from .login import KuaishouLogin
 
 
@@ -94,7 +95,24 @@ class KuaishouCrawler(AbstractCrawler):
 
 
             self.context_page = await self.browser_context.new_page()
-            await self.context_page.goto(f"{self.index_url}?isHome=1")
+            await self.context_page.add_init_script(KS_SIGN_CAPTURE_SCRIPT)
+            for attempt in range(1, 4):
+                try:
+                    await self.context_page.goto(
+                        f"{self.index_url}?isHome=1",
+                        wait_until="domcontentloaded",
+                        timeout=90_000,
+                    )
+                    break
+                except PlaywrightError as exc:
+                    if attempt >= 3:
+                        raise
+                    delay = 5 * attempt
+                    utils.logger.warning(
+                        f"[KuaishouCrawler.start] Home page navigation failed "
+                        f"({attempt}/3): {exc}. Retrying in {delay}s ..."
+                    )
+                    await asyncio.sleep(delay)
 
             # Create a client to interact with the kuaishou website.
             self.ks_client = await self.create_ks_client(httpx_proxy_format)
@@ -111,6 +129,10 @@ class KuaishouCrawler(AbstractCrawler):
                     browser_context=self.browser_context,
                     urls=self.cookie_urls,
                 )
+                if not await self.ks_client.pong():
+                    raise RuntimeError(
+                        "Kuaishou cookie login failed: platform still returned No Login/UNAUTHENTICATED after cookie injection."
+                    )
 
             crawler_type_var.set(config.CRAWLER_TYPE)
             if config.CRAWLER_TYPE == "search":
@@ -130,6 +152,7 @@ class KuaishouCrawler(AbstractCrawler):
     async def search(self):
         utils.logger.info("[KuaishouCrawler.search] Begin search kuaishou keywords")
         ks_limit_count = 20  # kuaishou limit page fixed value
+        requested_limit = max(1, config.CRAWLER_MAX_NOTES_COUNT)
         if config.CRAWLER_MAX_NOTES_COUNT < ks_limit_count:
             config.CRAWLER_MAX_NOTES_COUNT = ks_limit_count
         start_page = config.START_PAGE
@@ -140,9 +163,12 @@ class KuaishouCrawler(AbstractCrawler):
                 f"[KuaishouCrawler.search] Current search keyword: {keyword}"
             )
             page = 1
+            processed_count = 0
             while (
                 page - start_page + 1
             ) * ks_limit_count <= config.CRAWLER_MAX_NOTES_COUNT:
+                if processed_count >= requested_limit:
+                    break
                 if page < start_page:
                     utils.logger.info(f"[KuaishouCrawler.search] Skip page: {page}")
                     page += 1
@@ -151,34 +177,33 @@ class KuaishouCrawler(AbstractCrawler):
                     f"[KuaishouCrawler.search] search kuaishou keyword: {keyword}, page: {page}"
                 )
                 video_id_list: List[str] = []
-                videos_res = await self.ks_client.search_info_by_keyword(
+                videos_res = await self.ks_client.search_info_by_keyword_v2(
                     keyword=keyword,
                     pcursor=str(page),
                     search_session_id=search_session_id,
                 )
                 if not videos_res:
-                    utils.logger.error(
-                        f"[KuaishouCrawler.search] search info by keyword:{keyword} not found data"
+                    raise RuntimeError(
+                        f"Kuaishou search API returned empty data for keyword:{keyword}; current cookie/interface is not usable."
                     )
-                    break
 
-                vision_search_photo: Dict = videos_res.get("visionSearchPhoto")
-                if vision_search_photo.get("result") != 1:
-                    utils.logger.error(
-                        f"[KuaishouCrawler.search] search info by keyword:{keyword} not found data "
+                if videos_res.get("result") != 1:
+                    raise RuntimeError(
+                        f"Kuaishou search API returned result={videos_res.get('result')} for keyword:{keyword}: {videos_res}"
                     )
-                    break
-                search_session_id = vision_search_photo.get("searchSessionId", "")
-                for video_detail in vision_search_photo.get("feeds"):
+                search_session_id = videos_res.get("searchSessionId", "")
+                for video_detail in videos_res.get("feeds", []):
+                    if processed_count >= requested_limit:
+                        break
                     video_id_list.append(video_detail.get("photo", {}).get("id"))
                     await kuaishou_store.update_kuaishou_video(video_item=video_detail)
+                    processed_count += 1
 
                 # batch fetch video comments
                 page += 1
 
                 # Sleep after page navigation
-                await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
-                utils.logger.info(f"[KuaishouCrawler.search] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds after page {page-1}")
+                await crawler_util.random_crawl_sleep()
 
                 await self.batch_get_video_comments(video_id_list)
 
@@ -215,8 +240,7 @@ class KuaishouCrawler(AbstractCrawler):
                 result = await self.ks_client.get_video_info(video_id)
 
                 # Sleep after fetching video details
-                await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
-                utils.logger.info(f"[KuaishouCrawler.get_video_info_task] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds after fetching video details {video_id}")
+                await crawler_util.random_crawl_sleep()
 
                 utils.logger.info(
                     f"[KuaishouCrawler.get_video_info_task] Get video_id:{video_id} info result: {result} ..."
@@ -273,8 +297,7 @@ class KuaishouCrawler(AbstractCrawler):
                 )
 
                 # Sleep before fetching comments
-                await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
-                utils.logger.info(f"[KuaishouCrawler.get_comments] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds before fetching comments for video {video_id}")
+                await crawler_util.random_crawl_sleep()
 
                 await self.ks_client.get_video_all_comments(
                     photo_id=video_id,
@@ -296,7 +319,7 @@ class KuaishouCrawler(AbstractCrawler):
                 for task in current_running_tasks:
                     task.cancel()
                 time.sleep(20)
-                await self.context_page.goto(f"{self.index_url}?isHome=1")
+                await self.context_page.goto(f"{self.index_url}?isHome=1", wait_until="domcontentloaded", timeout=60_000)
                 await self.ks_client.update_cookies(
                     browser_context=self.browser_context,
                     urls=self.cookie_urls,

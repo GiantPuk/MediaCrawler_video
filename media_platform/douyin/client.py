@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 # Copyright (c) 2025 relakkes@gmail.com
 #
 # This file is part of MediaCrawler project.
@@ -28,7 +28,7 @@ from playwright.async_api import BrowserContext
 
 from base.base_crawler import AbstractApiClient
 from proxy.proxy_mixin import ProxyRefreshMixin
-from tools import utils
+from tools import crawler_util, utils
 from tools.httpx_util import make_async_client
 from var import request_keyword_var
 
@@ -156,7 +156,10 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
             browser_context,
             urls=self.cookie_urls,
         )
-        return cookie_dict.get("LOGIN_STATUS") == "1"
+        return (
+            cookie_dict.get("LOGIN_STATUS") == "1"
+            or bool(cookie_dict.get("sessionid") and cookie_dict.get("sid_guard"))
+        )
 
     async def update_cookies(self, browser_context: BrowserContext, urls: Optional[list[str]] = None):
         cookie_str, cookie_dict = await utils.convert_browser_context_cookies(
@@ -283,7 +286,7 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
             if callback:  # If there is a callback function, execute the callback function
                 await callback(aweme_id, comments)
 
-            await asyncio.sleep(crawl_interval)
+            await crawler_util.random_crawl_sleep()
             if not is_fetch_sub_comments:
                 continue
             # Get secondary reviews
@@ -306,7 +309,7 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
                         result.extend(sub_comments)
                         if callback:  # If there is a callback function, execute the callback function
                             await callback(aweme_id, sub_comments)
-                        await asyncio.sleep(crawl_interval)
+                        await crawler_util.random_crawl_sleep()
         return result
 
     async def get_user_info(self, sec_user_id: str):
@@ -382,3 +385,4 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
             except Exception as e:
                 utils.logger.error(f"[DouYinClient.resolve_short_url] Failed to resolve short URL: {e}")
                 return ""
+

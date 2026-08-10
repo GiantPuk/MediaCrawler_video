@@ -25,11 +25,11 @@ export function DataExplorerDialog() {
           {t('dialog.button')}
         </Button>
       </DialogTrigger>
-      <DialogContent className="max-w-5xl max-h-[85vh] overflow-hidden">
-        <DialogHeader>
+      <DialogContent className="flex h-[86vh] max-w-[min(1180px,96vw)] flex-col overflow-hidden">
+        <DialogHeader className="flex-shrink-0">
           <DialogTitle>{t('dialog.title')}</DialogTitle>
         </DialogHeader>
-        <div className="overflow-auto max-h-[calc(85vh-100px)] pr-2">
+        <div className="min-h-0 flex-1 overflow-hidden pt-2">
           <DataExplorer />
         </div>
       </DialogContent>

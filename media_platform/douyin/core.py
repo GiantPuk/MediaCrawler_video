@@ -28,6 +28,7 @@ from playwright.async_api import (
     BrowserType,
     Page,
     Playwright,
+    TimeoutError as PlaywrightTimeoutError,
     async_playwright,
 )
 
@@ -35,13 +36,13 @@ import config
 from base.base_crawler import AbstractCrawler
 from proxy.proxy_ip_pool import IpInfoModel, create_ip_pool
 from store import douyin as douyin_store
-from tools import utils
+from tools import crawler_util, utils
 from tools.cdp_browser import CDPBrowserManager
 from var import crawler_type_var, source_keyword_var
 
 from .client import DouYinClient
 from .exception import DataFetchError
-from .field import PublishTimeType
+from .field import PublishTimeType, SearchChannelType
 from .help import parse_video_info_from_url, parse_creator_info_from_url
 from .login import DouYinLogin
 
@@ -93,9 +94,18 @@ class DouYinCrawler(AbstractCrawler):
                 )
                 # stealth.min.js is a js script to prevent the website from detecting the crawler.
                 await self.browser_context.add_init_script(path="libs/stealth.min.js")
-
             self.context_page = await self.browser_context.new_page()
-            await self.context_page.goto(self.index_url)
+            try:
+                await self.context_page.goto(
+                    self.index_url,
+                    wait_until="domcontentloaded",
+                    timeout=60_000,
+                )
+            except PlaywrightTimeoutError as exc:
+                utils.logger.warning(
+                    f"[DouYinCrawler.start] Open Douyin homepage timed out, "
+                    f"continue with current browser context cookies: {exc}"
+                )
 
             self.dy_client = await self.create_douyin_client(httpx_proxy_format)
             if not await self.dy_client.pong(browser_context=self.browser_context):
@@ -127,6 +137,7 @@ class DouYinCrawler(AbstractCrawler):
     async def search(self) -> None:
         utils.logger.info("[DouYinCrawler.search] Begin search douyin keywords")
         dy_limit_count = 10  # douyin limit page fixed value
+        requested_limit = max(1, config.CRAWLER_MAX_NOTES_COUNT)
         if config.CRAWLER_MAX_NOTES_COUNT < dy_limit_count:
             config.CRAWLER_MAX_NOTES_COUNT = dy_limit_count
         start_page = config.START_PAGE  # start page number
@@ -134,9 +145,12 @@ class DouYinCrawler(AbstractCrawler):
             source_keyword_var.set(keyword)
             utils.logger.info(f"[DouYinCrawler.search] Current keyword: {keyword}")
             aweme_list: List[str] = []
+            processed_count = 0
             page = 0
             dy_search_id = ""
             while (page - start_page + 1) * dy_limit_count <= config.CRAWLER_MAX_NOTES_COUNT:
+                if processed_count >= requested_limit:
+                    break
                 if page < start_page:
                     utils.logger.info(f"[DouYinCrawler.search] Skip {page}")
                     page += 1
@@ -146,6 +160,7 @@ class DouYinCrawler(AbstractCrawler):
                     posts_res = await self.dy_client.search_info_by_keyword(
                         keyword=keyword,
                         offset=page * dy_limit_count - dy_limit_count,
+                        search_channel=SearchChannelType.VIDEO if getattr(config, "CREATOR_VIDEO_ONLY", False) else SearchChannelType.GENERAL,
                         publish_time=PublishTimeType(config.PUBLISH_TIME_TYPE),
                         search_id=dy_search_id,
                     )
@@ -163,6 +178,8 @@ class DouYinCrawler(AbstractCrawler):
                 dy_search_id = posts_res.get("extra", {}).get("logid", "")
                 page_aweme_list = []
                 for post_item in posts_res.get("data"):
+                    if processed_count >= requested_limit:
+                        break
                     try:
                         aweme_info: Dict = (post_item.get("aweme_info") or post_item.get("aweme_mix_info", {}).get("mix_items")[0])
                     except TypeError:
@@ -171,13 +188,13 @@ class DouYinCrawler(AbstractCrawler):
                     page_aweme_list.append(aweme_info.get("aweme_id", ""))
                     await douyin_store.update_douyin_aweme(aweme_item=aweme_info)
                     await self.get_aweme_media(aweme_item=aweme_info)
+                    processed_count += 1
                 
                 # Batch get note comments for the current page
                 await self.batch_get_note_comments(page_aweme_list)
 
                 # Sleep after each page navigation
-                await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
-                utils.logger.info(f"[DouYinCrawler.search] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds after page {page-1}")
+                await crawler_util.random_crawl_sleep()
             utils.logger.info(f"[DouYinCrawler.search] keyword:{keyword}, aweme_list:{aweme_list}")
 
     async def get_specified_awemes(self):
@@ -221,8 +238,7 @@ class DouYinCrawler(AbstractCrawler):
             try:
                 result = await self.dy_client.get_video_by_id(aweme_id)
                 # Sleep after fetching aweme detail
-                await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
-                utils.logger.info(f"[DouYinCrawler.get_aweme_detail] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds after fetching aweme {aweme_id}")
+                await crawler_util.random_crawl_sleep()
                 return result
             except DataFetchError as ex:
                 utils.logger.error(f"[DouYinCrawler.get_aweme_detail] Get aweme detail error: {ex}")
@@ -251,7 +267,7 @@ class DouYinCrawler(AbstractCrawler):
         async with semaphore:
             try:
                 # Pass the list of keywords to the get_aweme_all_comments method
-                # Use fixed crawling interval
+                # Use configured randomized crawling interval
                 crawl_interval = config.CRAWLER_MAX_SLEEP_SEC
                 await self.dy_client.get_aweme_all_comments(
                     aweme_id=aweme_id,
@@ -261,8 +277,7 @@ class DouYinCrawler(AbstractCrawler):
                     max_count=config.CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES,
                 )
                 # Sleep after fetching comments
-                await asyncio.sleep(crawl_interval)
-                utils.logger.info(f"[DouYinCrawler.get_comments] Sleeping for {crawl_interval} seconds after fetching comments for aweme {aweme_id}")
+                await crawler_util.random_crawl_sleep()
                 utils.logger.info(f"[DouYinCrawler.get_comments] aweme_id: {aweme_id} comments have all been obtained and filtered ...")
             except DataFetchError as e:
                 utils.logger.error(f"[DouYinCrawler.get_comments] aweme_id: {aweme_id} get comments failed, error: {e}")

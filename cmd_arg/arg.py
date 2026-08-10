@@ -225,6 +225,99 @@ async def parse_cmd(argv: Optional[Sequence[str]] = None):
                 show_default=True,
             ),
         ] = str(config.HEADLESS),
+        enable_cdp_mode: Annotated[
+            str,
+            typer.Option(
+                "--enable_cdp_mode",
+                help="Whether to launch through CDP mode. Set false for standalone Playwright browser.",
+                rich_help_panel="Runtime Configuration",
+                show_default=True,
+            ),
+        ] = str(config.ENABLE_CDP_MODE),
+        cdp_connect_existing: Annotated[
+            str,
+            typer.Option(
+                "--cdp_connect_existing",
+                help="Whether CDP mode should connect to an existing browser instead of launching its own browser.",
+                rich_help_panel="Runtime Configuration",
+                show_default=True,
+            ),
+        ] = str(config.CDP_CONNECT_EXISTING),
+        enable_get_medias: Annotated[
+            str,
+            typer.Option(
+                "--enable_get_medias",
+                help="Whether to download media resources such as images/videos, supports yes/true/t/y/1 or no/false/f/n/0",
+                rich_help_panel="Runtime Configuration",
+                show_default=True,
+            ),
+        ] = str(config.ENABLE_GET_MEIDAS),
+        crawler_min_sleep_sec: Annotated[
+            Optional[float],
+            typer.Option(
+                "--crawler_min_sleep_sec",
+                help="Minimum randomized sleep seconds after crawler requests. If omitted, the max value is used for backward-compatible fixed sleeps.",
+                rich_help_panel="Runtime Configuration",
+            ),
+        ] = None,
+        crawler_max_sleep_sec: Annotated[
+            float,
+            typer.Option(
+                "--crawler_max_sleep_sec",
+                help="Maximum randomized sleep seconds after crawler requests. Increase it to slow down collection.",
+                rich_help_panel="Runtime Configuration",
+            ),
+        ] = config.CRAWLER_MAX_SLEEP_SEC,
+        crawler_long_pause_every: Annotated[
+            int,
+            typer.Option(
+                "--crawler_long_pause_every",
+                help="Add a longer pause every N crawl waits. 0 disables long pauses.",
+                rich_help_panel="Runtime Configuration",
+            ),
+        ] = config.CRAWLER_LONG_PAUSE_EVERY,
+        crawler_long_pause_min_sec: Annotated[
+            float,
+            typer.Option(
+                "--crawler_long_pause_min_sec",
+                help="Minimum extra seconds for each long pause.",
+                rich_help_panel="Runtime Configuration",
+            ),
+        ] = config.CRAWLER_LONG_PAUSE_MIN_SEC,
+        crawler_long_pause_max_sec: Annotated[
+            float,
+            typer.Option(
+                "--crawler_long_pause_max_sec",
+                help="Maximum extra seconds for each long pause.",
+                rich_help_panel="Runtime Configuration",
+            ),
+        ] = config.CRAWLER_LONG_PAUSE_MAX_SEC,
+        creator_video_only: Annotated[
+            str,
+            typer.Option(
+                "--creator_video_only",
+                help="Creator mode should prefer creator videos when the platform supports a separate video feed.",
+                rich_help_panel="Runtime Configuration",
+                show_default=True,
+            ),
+        ] = str(getattr(config, "CREATOR_VIDEO_ONLY", False)),
+        weibo_search_type: Annotated[
+            str,
+            typer.Option(
+                "--weibo_search_type",
+                help="Weibo search type (default | real_time | popular | video). Video summary tasks use video.",
+                rich_help_panel="Platform Configuration",
+            ),
+        ] = getattr(config, "WEIBO_SEARCH_TYPE", "default"),
+        enable_weibo_full_text: Annotated[
+            str,
+            typer.Option(
+                "--enable_weibo_full_text",
+                help="Whether to fetch Weibo full text; disabling reduces extra requests.",
+                rich_help_panel="Platform Configuration",
+                show_default=True,
+            ),
+        ] = str(getattr(config, "ENABLE_WEIBO_FULL_TEXT", True)),
         save_data_option: Annotated[
             SaveDataOptionEnum,
             typer.Option(
@@ -338,8 +431,21 @@ async def parse_cmd(argv: Optional[Sequence[str]] = None):
         enable_comment = _to_bool(get_comment)
         enable_sub_comment = _to_bool(get_sub_comment)
         enable_headless = _to_bool(headless)
+        enable_cdp_mode_value = _to_bool(enable_cdp_mode)
+        cdp_connect_existing_value = _to_bool(cdp_connect_existing)
+        enable_get_medias_value = _to_bool(enable_get_medias)
+        creator_video_only_value = _to_bool(creator_video_only)
+        enable_weibo_full_text_value = _to_bool(enable_weibo_full_text)
         enable_ip_proxy_value = _to_bool(enable_ip_proxy)
         init_db_value = init_db.value if init_db else None
+        min_sleep = crawler_max_sleep_sec if crawler_min_sleep_sec is None else max(0.0, crawler_min_sleep_sec)
+        max_sleep = max(0.0, crawler_max_sleep_sec)
+        if max_sleep < min_sleep:
+            min_sleep, max_sleep = max_sleep, min_sleep
+        long_pause_min = max(0.0, crawler_long_pause_min_sec)
+        long_pause_max = max(0.0, crawler_long_pause_max_sec)
+        if long_pause_max < long_pause_min:
+            long_pause_min, long_pause_max = long_pause_max, long_pause_min
 
         # Parse specified_id and creator_id into lists
         specified_id_list = [id.strip() for id in specified_id.split(",") if id.strip()] if specified_id else []
@@ -355,6 +461,17 @@ async def parse_cmd(argv: Optional[Sequence[str]] = None):
         config.ENABLE_GET_SUB_COMMENTS = enable_sub_comment
         config.HEADLESS = enable_headless
         config.CDP_HEADLESS = enable_headless
+        config.ENABLE_CDP_MODE = enable_cdp_mode_value
+        config.CDP_CONNECT_EXISTING = cdp_connect_existing_value
+        config.ENABLE_GET_MEIDAS = enable_get_medias_value
+        config.CRAWLER_MIN_SLEEP_SEC = min_sleep
+        config.CRAWLER_MAX_SLEEP_SEC = max_sleep
+        config.CRAWLER_LONG_PAUSE_EVERY = max(0, crawler_long_pause_every)
+        config.CRAWLER_LONG_PAUSE_MIN_SEC = long_pause_min
+        config.CRAWLER_LONG_PAUSE_MAX_SEC = long_pause_max
+        config.CREATOR_VIDEO_ONLY = creator_video_only_value
+        config.WEIBO_SEARCH_TYPE = weibo_search_type
+        config.ENABLE_WEIBO_FULL_TEXT = enable_weibo_full_text_value
         config.SAVE_DATA_OPTION = save_data_option.value
         config.COOKIES = cookies
         config.CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES = max_comments_count_singlenotes
@@ -400,6 +517,8 @@ async def parse_cmd(argv: Optional[Sequence[str]] = None):
                 config.TIEBA_CREATOR_URL_LIST = [
                     _normalize_tieba_creator_url(item) for item in creator_id_list
                 ]
+            elif platform == PlatformEnum.ZHIHU:
+                config.ZHIHU_CREATOR_URL_LIST = creator_id_list
 
         return SimpleNamespace(
             platform=config.PLATFORM,
@@ -410,6 +529,17 @@ async def parse_cmd(argv: Optional[Sequence[str]] = None):
             get_comment=config.ENABLE_GET_COMMENTS,
             get_sub_comment=config.ENABLE_GET_SUB_COMMENTS,
             headless=config.HEADLESS,
+            enable_cdp_mode=config.ENABLE_CDP_MODE,
+            cdp_connect_existing=config.CDP_CONNECT_EXISTING,
+            enable_get_medias=config.ENABLE_GET_MEIDAS,
+            crawler_min_sleep_sec=config.CRAWLER_MIN_SLEEP_SEC,
+            crawler_max_sleep_sec=config.CRAWLER_MAX_SLEEP_SEC,
+            crawler_long_pause_every=config.CRAWLER_LONG_PAUSE_EVERY,
+            crawler_long_pause_min_sec=config.CRAWLER_LONG_PAUSE_MIN_SEC,
+            crawler_long_pause_max_sec=config.CRAWLER_LONG_PAUSE_MAX_SEC,
+            creator_video_only=config.CREATOR_VIDEO_ONLY,
+            weibo_search_type=config.WEIBO_SEARCH_TYPE,
+            enable_weibo_full_text=config.ENABLE_WEIBO_FULL_TEXT,
             save_data_option=config.SAVE_DATA_OPTION,
             init_db=init_db_value,
             cookies=config.COOKIES,

@@ -85,21 +85,29 @@ def parse_video_info_from_url(url: str) -> VideoUrlInfo:
             - https://www.bilibili.com/video/BV1dwuKzmE26/?spm_id_from=333.1387.homepage.video_card.click
             - https://www.bilibili.com/video/BV1d54y1g7db
             - BV1d54y1g7db (directly pass BV number)
+            - https://www.bilibili.com/video/av123456
+            - av123456 or 123456 (aid)
     Returns:
         VideoUrlInfo: Object containing video ID
     """
     # If the input is already a BV number, return directly
     if url.startswith("BV"):
-        return VideoUrlInfo(video_id=url)
+        return VideoUrlInfo(video_id=url, video_type="bvid")
 
-    # Use regex to extract BV number
-    # Match /video/BV... or /video/av... format
+    if url.startswith("av") and url[2:].isdigit():
+        return VideoUrlInfo(video_id=url[2:], video_type="aid")
+
+    if url.isdigit():
+        return VideoUrlInfo(video_id=url, video_type="aid")
+
     bv_pattern = r'/video/(BV[a-zA-Z0-9]+)'
-    match = re.search(bv_pattern, url)
+    bv_match = re.search(bv_pattern, url)
+    if bv_match:
+        return VideoUrlInfo(video_id=bv_match.group(1), video_type="bvid")
 
-    if match:
-        video_id = match.group(1)
-        return VideoUrlInfo(video_id=video_id)
+    av_match = re.search(r"/video/av(\d+)", url)
+    if av_match:
+        return VideoUrlInfo(video_id=av_match.group(1), video_type="aid")
 
     raise ValueError(f"Unable to parse video ID from URL: {url}")
 

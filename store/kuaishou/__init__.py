@@ -52,12 +52,26 @@ class KuaishouStoreFactory:
         return store_class()
 
 
+def _duration_seconds_from_platform_value(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number <= 0:
+        return None
+    if number > 1000:
+        number = number / 1000
+    return round(number, 3)
+
+
 async def update_kuaishou_video(video_item: Dict):
     photo_info: Dict = video_item.get("photo", {})
     video_id = photo_info.get("id")
     if not video_id:
         return
     user_info = video_item.get("author", {})
+    duration_raw = photo_info.get("duration")
+    duration_seconds = _duration_seconds_from_platform_value(duration_raw)
     save_content_item = {
         "video_id": video_id,
         "video_type": str(video_item.get("type")),
@@ -74,6 +88,9 @@ async def update_kuaishou_video(video_item: Dict):
         "video_play_url": photo_info.get("photoUrl", ""),
         "source_keyword": source_keyword_var.get(),
     }
+    if duration_seconds is not None:
+        save_content_item["duration"] = duration_raw
+        save_content_item["duration_seconds"] = duration_seconds
     utils.logger.info(
         f"[store.kuaishou.update_kuaishou_video] Kuaishou video id:{video_id}, title:{save_content_item.get('title')}")
     await KuaishouStoreFactory.create_store().store_content(content_item=save_content_item)

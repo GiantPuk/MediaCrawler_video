@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 # Copyright (c) 2025 relakkes@gmail.com
 #
 # This file is part of MediaCrawler project.
@@ -34,7 +34,7 @@ from tools.httpx_util import make_async_client
 import config
 from base.base_crawler import AbstractApiClient
 from proxy.proxy_mixin import ProxyRefreshMixin
-from tools import utils
+from tools import crawler_util, utils
 
 if TYPE_CHECKING:
     from proxy.proxy_ip_pool import ProxyIpPool
@@ -226,19 +226,84 @@ class BilibiliClient(AbstractApiClient, ProxyRefreshMixin):
         return await self.get(uri, params, enable_params_sign=True)
 
     async def get_video_media(self, url: str) -> Union[bytes, None]:
-        # Follow CDN 302 redirects and treat any 2xx as success (some endpoints return 206)
-        async with make_async_client(proxy=self.proxy, follow_redirects=True) as client:
+        # Bilibili CDN connections may close before the declared Content-Length is read.
+        # Keep the partial bytes in memory and resume with Range instead of restarting.
+        max_retries = 10
+        downloaded = bytearray()
+        expected_total: Optional[int] = None
+        last_logged_mb = 0
+
+        for attempt in range(1, max_retries + 1):
+            request_headers = dict(self.headers)
+            if downloaded:
+                request_headers["Range"] = f"bytes={len(downloaded)}-"
+
             try:
-                response = await client.request("GET", url, timeout=self.timeout, headers=self.headers)
-                response.raise_for_status()
-                if 200 <= response.status_code < 300:
-                    return response.content
-                utils.logger.error(
-                    f"[BilibiliClient.get_video_media] Unexpected status {response.status_code} for {url}"
+                async with make_async_client(proxy=self.proxy, follow_redirects=True) as client:
+                    async with client.stream("GET", url, timeout=self.timeout, headers=request_headers) as response:
+                        if response.status_code == 416 and downloaded:
+                            utils.logger.info(
+                                f"[BilibiliClient.get_video_media] Range already complete, bytes={len(downloaded)}"
+                            )
+                            return bytes(downloaded)
+                        response.raise_for_status()
+
+                        content_range = response.headers.get("content-range", "")
+                        if "/" in content_range:
+                            total_value = content_range.rsplit("/", 1)[-1]
+                            if total_value.isdigit():
+                                expected_total = int(total_value)
+                        else:
+                            content_length = response.headers.get("content-length")
+                            if content_length and content_length.isdigit():
+                                if response.status_code == 206:
+                                    expected_total = len(downloaded) + int(content_length)
+                                else:
+                                    expected_total = int(content_length)
+
+                        if downloaded and response.status_code != 206:
+                            utils.logger.warning(
+                                "[BilibiliClient.get_video_media] CDN ignored Range header; restarting from byte 0"
+                            )
+                            downloaded = bytearray()
+                            last_logged_mb = 0
+
+                        async for chunk in response.aiter_bytes():
+                            if not chunk:
+                                continue
+                            downloaded.extend(chunk)
+                            current_mb = len(downloaded) // (10 * 1024 * 1024)
+                            if current_mb > last_logged_mb:
+                                last_logged_mb = current_mb
+                                if expected_total:
+                                    utils.logger.info(
+                                        f"[BilibiliClient.get_video_media] downloaded {len(downloaded)}/{expected_total} bytes"
+                                    )
+                                else:
+                                    utils.logger.info(
+                                        f"[BilibiliClient.get_video_media] downloaded {len(downloaded)} bytes"
+                                    )
+
+                if downloaded and (not expected_total or len(downloaded) >= expected_total):
+                    return bytes(downloaded)
+
+                raise RuntimeError(
+                    f"incomplete media download: received {len(downloaded)} bytes, expected {expected_total}"
                 )
-                return None
-            except httpx.HTTPError as exc:  # some wrong when call httpx.request method, such as connection error, client error, server error or response status code is not 2xx
-                utils.logger.error(f"[BilibiliClient.get_video_media] {exc.__class__.__name__} for {exc.request.url} - {exc}")  # Keep original exception type name for developer debugging
+            except Exception as exc:
+                if attempt < max_retries:
+                    delay = min(2 + attempt, 8)
+                    utils.logger.warning(
+                        f"[BilibiliClient.get_video_media] interrupted at {len(downloaded)} bytes; "
+                        f"retrying with Range in {delay}s ({attempt}/{max_retries}): {type(exc).__name__}: {exc}"
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+
+                utils.logger.error(
+                    f"[BilibiliClient.get_video_media] failed after {max_retries} attempts at "
+                    f"{len(downloaded)} bytes: {type(exc).__name__}: {exc}"
+                )
                 return None
 
     async def get_video_comments(
@@ -324,7 +389,7 @@ class BilibiliClient(AbstractApiClient, ProxyRefreshMixin):
                 comment_list = comment_list[:max_count - len(result)]
             if callback:  # If there is a callback function, execute it
                 await callback(video_id, comment_list)
-            await asyncio.sleep(crawl_interval)
+            await crawler_util.random_crawl_sleep()
             if not is_fetch_sub_comments:
                 result.extend(comment_list)
                 continue
@@ -356,7 +421,7 @@ class BilibiliClient(AbstractApiClient, ProxyRefreshMixin):
             comment_list: List[Dict] = result.get("replies", [])
             if callback:  # If there is a callback function, execute it
                 await callback(video_id, comment_list)
-            await asyncio.sleep(crawl_interval)
+            await crawler_util.random_crawl_sleep()
             if (int(result["page"]["count"]) <= pn * ps):
                 break
 
@@ -506,7 +571,7 @@ class BilibiliClient(AbstractApiClient, ProxyRefreshMixin):
                 fans_list = fans_list[:max_count - len(result)]
             if callback:  # If there is a callback function, execute it
                 await callback(creator_info, fans_list)
-            await asyncio.sleep(crawl_interval)
+            await crawler_util.random_crawl_sleep()
             if not fans_list:
                 break
             result.extend(fans_list)
@@ -540,7 +605,7 @@ class BilibiliClient(AbstractApiClient, ProxyRefreshMixin):
                 followings_list = followings_list[:max_count - len(result)]
             if callback:  # If there is a callback function, execute it
                 await callback(creator_info, followings_list)
-            await asyncio.sleep(crawl_interval)
+            await crawler_util.random_crawl_sleep()
             if not followings_list:
                 break
             result.extend(followings_list)
@@ -575,6 +640,7 @@ class BilibiliClient(AbstractApiClient, ProxyRefreshMixin):
                 dynamics_list = dynamics_list[:max_count - len(result)]
             if callback:
                 await callback(creator_info, dynamics_list)
-            await asyncio.sleep(crawl_interval)
+            await crawler_util.random_crawl_sleep()
             result.extend(dynamics_list)
         return result
+
