@@ -85,7 +85,7 @@ const SelectContent = React.forwardRef<
         className={cn(
           'p-1',
           position === 'popper' &&
-            'h-[var(--radix-select-trigger-height)] w-full min-w-[var(--radix-select-trigger-width)]'
+            'max-h-[var(--radix-select-content-available-height)] w-full min-w-[var(--radix-select-trigger-width)]'
         )}
       >
         {children}
@@ -108,10 +108,14 @@ const SelectLabel = React.forwardRef<
 ))
 SelectLabel.displayName = SelectPrimitive.Label.displayName
 
+type SelectItemProps = React.ComponentPropsWithoutRef<typeof SelectPrimitive.Item> & {
+  rightSlot?: React.ReactNode
+}
+
 const SelectItem = React.forwardRef<
   React.ElementRef<typeof SelectPrimitive.Item>,
-  React.ComponentPropsWithoutRef<typeof SelectPrimitive.Item>
->(({ className, children, ...props }, ref) => (
+  SelectItemProps
+>(({ className, children, rightSlot, ...props }, ref) => (
   <SelectPrimitive.Item
     ref={ref}
     className={cn(
@@ -127,6 +131,7 @@ const SelectItem = React.forwardRef<
     </span>
 
     <SelectPrimitive.ItemText>{children}</SelectPrimitive.ItemText>
+    {rightSlot ? <span className="ml-auto shrink-0 pl-3">{rightSlot}</span> : null}
   </SelectPrimitive.Item>
 ))
 SelectItem.displayName = SelectPrimitive.Item.displayName

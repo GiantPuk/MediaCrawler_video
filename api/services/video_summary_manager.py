@@ -14,11 +14,12 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time as time_module
 import uuid
 import wave
 from dataclasses import dataclass, field
-from datetime import datetime, time
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import quote, urlencode, urlparse
@@ -26,7 +27,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from tools.crawler_util import normalize_cookie_input
+from tools.crawler_util import normalize_cookie_input, parse_cookie_input
 
 from ..schemas.video_summary import (
     CreatorCandidate,
@@ -34,6 +35,8 @@ from ..schemas.video_summary import (
     CreatorResolveResponse,
     PlatformCredentialRequest,
     PlatformCredentialResponse,
+    PlatformCredentialHealthResponse,
+    PlatformCredentialSelfTestResponse,
     PlatformCredentialSecretResponse,
     PlatformCredentialsResponse,
     PlatformQrcodeLoginRequest,
@@ -57,6 +60,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 TASK_ROOT = PROJECT_ROOT / "data" / "video_tasks"
 QWEN_SETTINGS_PATH = TASK_ROOT / "qwen_settings.json"
 PLATFORM_CREDENTIALS_PATH = TASK_ROOT / "platform_credentials.json"
+TASK_STATE_FILE_NAME = "task_state.json"
 LOCAL_TZ = ZoneInfo("Asia/Shanghai")
 QWEN_BASE64_RAW_VIDEO_LIMIT_MB = 7
 QWEN_DASHSCOPE_LOCAL_VIDEO_LIMIT_MB = 100
@@ -67,6 +71,34 @@ OSS_MULTIPART_THRESHOLD_BYTES = 2 * 1024 * 1024
 OSS_MULTIPART_PART_SIZE_BYTES = 4 * 1024 * 1024
 REMOTE_OSS_MAX_UPLOAD_ATTEMPTS_PER_ITEM = 1
 DEFAULT_WHISPER_MODEL = "turbo"
+OLLAMA_DEFAULT_RUNTIME_PROFILE = {
+    "num_ctx": 8192,
+    "num_predict": 1200,
+    "max_images": 4,
+    "text_context_chars": 5000,
+}
+OLLAMA_MODEL_RUNTIME_PROFILES = [
+    (
+        ("qwen2.5vl:3b", "qwen2.5-vl:3b", "qwen2.5vl-3b"),
+        {"num_ctx": 8192, "num_predict": 1100, "max_images": 4, "text_context_chars": 4200},
+    ),
+    (
+        ("qwen2.5vl:7b", "qwen2.5-vl:7b", "qwen2.5vl-7b"),
+        {"num_ctx": 8192, "num_predict": 1300, "max_images": 5, "text_context_chars": 5500},
+    ),
+    (
+        ("qwen3-vl:8b", "qwen3-vl-8b", "qwen3vl:8b", "qwen3vl-8b"),
+        {"num_ctx": 12288, "num_predict": 1400, "max_images": 6, "text_context_chars": 6500},
+    ),
+    (
+        ("llama3.2-vision:11b", "llama3.2-vision-11b"),
+        {"num_ctx": 8192, "num_predict": 1200, "max_images": 4, "text_context_chars": 5000},
+    ),
+    (
+        ("llava:7b", "llava-7b"),
+        {"num_ctx": 4096, "num_predict": 900, "max_images": 2, "text_context_chars": 2600},
+    ),
+]
 
 DEFAULT_QWEN_SETTINGS = {
     "api_key": "",
@@ -90,7 +122,7 @@ DEFAULT_QWEN_SETTINGS = {
     "oss_cleanup_after_analysis": True,
 }
 QWEN_PROFILE_FIELDS = set(DEFAULT_QWEN_SETTINGS)
-QWEN_API_PROVIDERS = {"dashscope", "openai_compatible"}
+QWEN_API_PROVIDERS = {"dashscope", "openai_compatible", "ollama"}
 VIDEO_UPLOAD_BACKENDS = {"auto", "oss", "dashscope", "openai"}
 
 PLATFORM_STORE_NAMES = {
@@ -133,6 +165,20 @@ URL_KEYS = [
     "url",
     "share_url",
     "arcurl",
+]
+COVER_KEYS = [
+    "video_cover_url",
+    "cover",
+    "cover_url",
+    "pic",
+    "pic_url",
+    "first_frame",
+    "thumbnail",
+    "thumbnail_url",
+    "poster",
+    "image",
+    "image_url",
+    "image_list",
 ]
 TIME_KEYS = [
     "time",
@@ -179,6 +225,39 @@ STRONG_TEXT_SOURCE_LABELS = {
 }
 SHORT_METADATA_LABELS = {"标题", "描述"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".flv", ".mkv"}
+PLATFORM_COOKIE_REQUIREMENTS: Dict[str, Dict[str, List[str]]] = {
+    "bili": {
+        "required": [],
+        "required_any": ["SESSDATA", "DedeUserID"],
+        "recommended": ["bili_jct"],
+    },
+    "dy": {
+        "required": [],
+        "required_any": ["LOGIN_STATUS", "sessionid+sid_guard"],
+        "recommended": ["LOGIN_STATUS", "uid_tt", "passport_csrf_token"],
+    },
+    "ks": {
+        "required": ["passToken"],
+        "recommended": ["kuaishou.server.web_ph", "userId"],
+    },
+    "xhs": {
+        "required": ["web_session"],
+        "recommended": ["a1", "webId"],
+    },
+    "wb": {
+        "required": [],
+        "required_any": ["SSOLoginState", "WBPSESS"],
+        "recommended": ["SUB", "SUBP", "WBPSESS"],
+    },
+    "zhihu": {
+        "required": ["z_c0"],
+        "recommended": ["_xsrf"],
+    },
+    "tieba": {
+        "required": ["BDUSS"],
+        "recommended": ["STOKEN", "BAIDUID"],
+    },
+}
 NATIVE_DOWNLOAD_PLATFORMS = {"xhs", "dy", "bili", "ks"}
 NATIVE_DETAIL_DOWNLOAD_PLATFORMS = {"xhs", "dy", "bili", "ks"}
 VIDEO_INPUT_MODES = {"auto", "video", "frames", "text_first"}
@@ -293,6 +372,10 @@ class VideoTask:
     cancel_requested: bool = False
     download_progress: Optional[VideoDownloadProgress] = None
     subtasks: List[VideoTaskStep] = field(default_factory=list)
+    records: List[Dict[str, Any]] = field(default_factory=list)
+    items: List[VideoSummaryItem] = field(default_factory=list)
+    resume_from_state: bool = False
+    last_state_save_at: float = 0.0
 
     def add_log(self, message: str) -> None:
         timestamp = datetime.now(LOCAL_TZ).strftime("%H:%M:%S")
@@ -526,6 +609,221 @@ class VideoSummaryManager:
         store["active_by_platform"] = active
         self._save_credential_store(store)
         return self._credential_response(profile, active)
+
+    async def check_platform_credential_health(self, profile_id: str) -> PlatformCredentialHealthResponse:
+        store = self._load_credential_store(include_secret=True)
+        profile = self._credential_by_id(store, profile_id)
+        platform = str(profile.get("platform") or "")
+        cookies = str(profile.get("cookies") or "")
+        cookie_dict = parse_cookie_input(cookies)
+        present_keys = sorted(cookie_dict)
+        requirements = PLATFORM_COOKIE_REQUIREMENTS.get(platform, {"required": [], "recommended": []})
+        missing_required = [key for key in requirements.get("required", []) if not cookie_dict.get(key)]
+        required_any = requirements.get("required_any", [])
+        if required_any and not self._cookie_requirement_any_satisfied(cookie_dict, required_any):
+            missing_required.append(" or ".join(required_any))
+        missing_recommended = [key for key in requirements.get("recommended", []) if not cookie_dict.get(key)]
+
+        status = "ok"
+        message = "Cookie profile contains the required login fields."
+        probe_result: Dict[str, Any] = {
+            "live_probe_supported": False,
+            "live_probe_ok": None,
+            "probe_url": "",
+            "http_status": None,
+            "authenticated": None,
+            "details": {},
+        }
+        if missing_required:
+            status = "error"
+            message = "Cookie profile is missing required login fields: " + ", ".join(missing_required)
+        elif platform == "bili":
+            probe_result = await self._probe_bili_credential(cookies)
+            if probe_result.get("live_probe_ok"):
+                status = "ok"
+                message = "Bilibili nav API confirmed the account is logged in."
+            else:
+                status = "error"
+                detail = str((probe_result.get("details") or {}).get("message") or "")
+                message = "Bilibili nav API did not confirm login" + (f": {detail}" if detail else ".")
+        elif platform in {"dy", "ks", "xhs", "wb", "zhihu", "tieba"}:
+            status = "warning"
+            message = (
+                f"{PLATFORM_LABELS.get(platform, platform)} required cookie fields are present, "
+                "but this workbench has no stable low-risk live login probe for this platform yet. "
+                "Run a conservative metadata-only task to verify platform acceptance."
+            )
+
+        return PlatformCredentialHealthResponse(
+            profile_id=str(profile["id"]),
+            platform=profile["platform"],
+            status=status,  # type: ignore[arg-type]
+            checked_at=self._now_iso(),
+            message=message,
+            cookie_count=len(present_keys),
+            present_keys=present_keys,
+            missing_required_keys=missing_required,
+            missing_recommended_keys=missing_recommended,
+            live_probe_supported=bool(probe_result.get("live_probe_supported")),
+            live_probe_ok=probe_result.get("live_probe_ok"),
+            probe_url=str(probe_result.get("probe_url") or ""),
+            http_status=probe_result.get("http_status"),
+            authenticated=probe_result.get("authenticated"),
+            details=dict(probe_result.get("details") or {}),
+        )
+
+    async def self_test_platform_credential(self, profile_id: str) -> PlatformCredentialSelfTestResponse:
+        health = await self.check_platform_credential_health(profile_id)
+        if health.status == "error":
+            return PlatformCredentialSelfTestResponse(
+                profile_id=profile_id,
+                platform=health.platform,
+                status="error",
+                checked_at=self._now_iso(),
+                message=f"Cookie field check failed before live self-test: {health.message}",
+                health=health,
+                error_message=health.message,
+            )
+
+        request, probe_keyword = self._build_credential_self_test_request(profile_id, health.platform.value)
+        started = time_module.perf_counter()
+        initial_status = await self.start_task(request)
+        task_id = initial_status.task_id
+        last_status = initial_status
+        timeout_seconds = 120.0
+
+        while last_status.status not in {"completed", "error"}:
+            if time_module.perf_counter() - started > timeout_seconds:
+                await self.stop_task(task_id)
+                last_status = self.get_task(task_id) or last_status
+                break
+            await asyncio.sleep(2.0)
+            last_status = self.get_task(task_id) or last_status
+
+        wall_seconds = round(time_module.perf_counter() - started, 3)
+        result = last_status.result
+        total_records = int(result.total_records if result else 0)
+        matched_videos = int(result.matched_videos if result else 0)
+        item_count = len(result.items) if result else 0
+        logs_tail = list(last_status.logs[-16:])
+
+        if last_status.status == "completed":
+            if total_records > 0 or item_count > 0:
+                status = "ok"
+                message = (
+                    f"Live metadata-only self-test succeeded: collected {total_records} raw record(s), "
+                    f"prepared {item_count} candidate item(s)."
+                )
+            else:
+                status = "warning"
+                message = "Live metadata-only self-test completed, but no records were collected."
+        else:
+            status = "error"
+            message = last_status.error_message or "Live metadata-only self-test failed."
+
+        return PlatformCredentialSelfTestResponse(
+            profile_id=profile_id,
+            platform=health.platform,
+            status=status,  # type: ignore[arg-type]
+            checked_at=self._now_iso(),
+            message=message,
+            health=health,
+            task_id=task_id,
+            task_status=last_status.status,
+            source_mode=request.source_mode,
+            probe_keyword=probe_keyword,
+            total_records=total_records,
+            matched_videos=matched_videos,
+            item_count=item_count,
+            wall_seconds=wall_seconds,
+            error_message=last_status.error_message,
+            logs_tail=logs_tail,
+        )
+
+    def _build_credential_self_test_request(self, profile_id: str, platform: str) -> Tuple[VideoSummaryTaskRequest, str]:
+        probe_keyword_by_platform = {
+            "bili": "泰坦尼克号",
+            "dy": "美食",
+            "xhs": "咖啡",
+            "ks": "旅行",
+            "wb": "美食",
+            "zhihu": "AI",
+            "tieba": "",
+        }
+        ranking_type_by_platform = {
+            "tieba": "hot_topic",
+        }
+        probe_keyword = probe_keyword_by_platform.get(platform, "测试")
+        source_mode = "ranking" if platform in ranking_type_by_platform else "search"
+        today = date.today()
+        return (
+            VideoSummaryTaskRequest(
+                platform=platform,
+                creator_id=probe_keyword if source_mode == "search" else f"self-test:{platform}",
+                creator_display_name=f"{PLATFORM_LABELS.get(platform, platform)} credential self-test",
+                source_mode=source_mode,  # type: ignore[arg-type]
+                search_keyword=probe_keyword,
+                ranking_type=ranking_type_by_platform.get(platform, ""),
+                ranking_limit=1,
+                credential_profile_id=profile_id,
+                workflow_mode="metadata_only",
+                login_type="cookie",  # type: ignore[arg-type]
+                cookies="",
+                start_date=today - timedelta(days=30),
+                end_date=today,
+                max_crawl_items=10,
+                max_videos=1,
+                crawl_concurrency=1,
+                headless=True,
+                crawl_sleep_seconds=6.0,
+                crawl_min_sleep_seconds=3.0,
+                crawl_max_sleep_seconds=6.0,
+                crawl_long_pause_every=0,
+                summarize=False,
+                enable_whisper_transcription=False,
+            ),
+            probe_keyword,
+        )
+
+    async def _probe_bili_credential(self, cookies: str) -> Dict[str, Any]:
+        probe_url = "https://api.bilibili.com/x/web-interface/nav"
+        headers = dict(BILI_HEADERS)
+        headers["Cookie"] = cookies
+        try:
+            async with httpx.AsyncClient(timeout=20.0, headers=headers, follow_redirects=True, trust_env=False) as client:
+                response = await client.get(probe_url)
+            payload = response.json()
+            data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+            authenticated = bool(data.get("isLogin"))
+            return {
+                "live_probe_supported": True,
+                "live_probe_ok": response.status_code == 200 and payload.get("code") == 0 and authenticated,
+                "probe_url": probe_url,
+                "http_status": response.status_code,
+                "authenticated": authenticated,
+                "details": {
+                    "code": payload.get("code"),
+                    "message": payload.get("message"),
+                    "uname": data.get("uname"),
+                    "mid": data.get("mid"),
+                },
+            }
+        except Exception as exc:
+            return {
+                "live_probe_supported": True,
+                "live_probe_ok": False,
+                "probe_url": probe_url,
+                "http_status": None,
+                "authenticated": None,
+                "details": {"error": f"{type(exc).__name__}: {exc}"},
+            }
+
+    def _cookie_requirement_any_satisfied(self, cookie_dict: Dict[str, str], required_any: List[str]) -> bool:
+        for requirement in required_any:
+            keys = [part.strip() for part in str(requirement).split("+") if part.strip()]
+            if keys and all(cookie_dict.get(key) for key in keys):
+                return True
+        return False
 
     async def start_platform_qrcode_login(self, request: PlatformQrcodeLoginRequest) -> PlatformQrcodeLoginStatus:
         if request.platform.value == "tieba":
@@ -845,11 +1143,16 @@ class VideoSummaryManager:
                 progress_message="Task queued",
             )
             self._tasks[task_id] = task
+            self._save_task_state(task, force=True)
             task.runner = asyncio.create_task(self._run_task(task))
             return task.to_status()
 
     def get_task(self, task_id: str) -> Optional[VideoSummaryTaskStatus]:
         task = self._tasks.get(task_id)
+        if not task:
+            task = self._load_task_from_state(task_id)
+            if task:
+                self._tasks[task_id] = task
         return task.to_status() if task else None
 
     async def stop_task(self, task_id: str) -> bool:
@@ -868,12 +1171,44 @@ class VideoSummaryManager:
         task.progress_message = "Task stopped"
         task.completed_at = datetime.now(LOCAL_TZ)
         self._set_download_progress(task, status="failed", message="Task was stopped by user")
+        self._save_task_state(task, force=True)
         return True
+
+    async def resume_task(self, task_id: str) -> VideoSummaryTaskStatus:
+        async with self._lock:
+            running = [task for task in self._tasks.values() if task.status in {"pending", "running"}]
+            if running:
+                raise RuntimeError(f"Video task {running[0].task_id} is already running")
+            running_login = [task for task in self._login_tasks.values() if task.status in {"pending", "running"}]
+            if running_login:
+                raise RuntimeError(f"Platform login task {running_login[0].task_id} is already running")
+
+            task = self._tasks.get(task_id) or self._load_task_from_state(task_id)
+            if not task:
+                raise RuntimeError(f"Video task state was not found: {task_id}")
+            if task.status == "completed":
+                return task.to_status()
+
+            task.status = "pending"
+            task.completed_at = None
+            task.error_message = None
+            task.cancel_requested = False
+            task.process = None
+            task.runner = None
+            task.resume_from_state = True
+            task.progress_message = "Task queued for resume"
+            task.add_log("Resuming video summary task from saved state")
+            self._tasks[task_id] = task
+            self._save_task_state(task, force=True)
+            task.runner = asyncio.create_task(self._run_task(task))
+            return task.to_status()
 
     async def _run_task(self, task: VideoTask) -> None:
         task.status = "running"
         task.progress_message = "Running MediaCrawler metadata task"
         task.add_log("Video task started")
+        saved_resume_items = [item.model_copy(deep=True) for item in task.items] if task.resume_from_state else []
+        self._save_task_state(task, force=True)
         self._start_step(task, "metadata", "检索/加载候选视频元数据", phase="metadata")
 
         try:
@@ -910,6 +1245,7 @@ class VideoSummaryManager:
                         task,
                         self._build_search_metadata_command(task),
                         "Search metadata crawler command",
+                        monitor_filtered_candidates=True,
                     )
                     self._check_cancelled(task)
                     if exit_code != 0:
@@ -944,6 +1280,7 @@ class VideoSummaryManager:
                         task,
                         self._build_creator_metadata_command(task),
                         "Metadata crawler command",
+                        monitor_filtered_candidates=True,
                     )
                     self._check_cancelled(task)
                     if exit_code != 0:
@@ -964,12 +1301,27 @@ class VideoSummaryManager:
 
                 task.progress_message = "Filtering videos by publish date"
                 items = await self._collect_video_items(task, records)
+            if saved_resume_items:
+                items = self._merge_saved_item_state(items, saved_resume_items)
+                task.add_log(f"Restored saved progress for {len(saved_resume_items)} candidate item(s)")
+                if items and task.error_message:
+                    task.add_log(f"Resume will continue with saved candidates despite metadata refresh warning: {task.error_message}")
+                    task.error_message = None
+            task.records = records
+            task.items = items
+            self._save_task_state(task, force=True)
+            task.add_log(
+                f"Candidate limits: crawled up to {self._task_crawl_limit(task)} raw item(s), "
+                f"kept up to {task.request.max_videos} filtered candidate(s)"
+            )
             if task.request.source_mode == "ranking":
                 task.add_log(f"Prepared {len(items)} ranking candidates")
             else:
                 task.add_log(f"Matched {len(items)} video records in selected date range")
             self._finish_step(task, "metadata", message=f"{len(items)} candidate item(s)")
             items = self._filter_selected_items(task, items)
+            task.items = items
+            self._save_task_state(task, force=True)
             if task.request.selected_item_ids:
                 task.add_log(f"Selected {len(items)} video records for download and summary")
 
@@ -978,6 +1330,7 @@ class VideoSummaryManager:
                 task.result = result
                 task.completed_at = datetime.now(LOCAL_TZ)
                 self._save_result(task)
+                self._save_task_state(task, force=True)
                 metadata_failure_reason = self._metadata_failure_reason(task, records, items)
                 if (task.error_message or metadata_failure_reason) and not records and not items:
                     task.status = "error"
@@ -988,18 +1341,29 @@ class VideoSummaryManager:
                     task.status = "completed"
                     task.progress_message = "Candidate metadata ready"
                     task.add_log(f"Candidate metadata task completed in {self._format_elapsed(self._task_elapsed_seconds(task))}")
+                self._save_task_state(task, force=True)
                 return
 
             if items and not self._should_defer_download_until_summary(task):
                 task.progress_message = "Downloading matched videos"
                 await self._prepare_video_files(task, items)
+                task.items = items
+                self._save_task_state(task, force=True)
 
             self._check_cancelled(task)
             task.progress_message = "Summarizing videos with Qwen-VL"
             await self._summarize_items(task, items)
+            task.items = items
+            self._save_task_state(task, force=True)
 
             task.progress_message = "Building aggregate summary"
-            self._start_step(task, "aggregate_summary", "生成整体汇总", phase="summary")
+            self._start_step(
+                task,
+                "aggregate_summary",
+                "生成整体汇总",
+                phase="summary",
+                message=self._qwen_runtime_label(self._runtime_qwen_settings(task)),
+            )
             result = await self._build_result(task, records, items)
             self._finish_step(task, "aggregate_summary")
             task.result = result
@@ -1014,6 +1378,7 @@ class VideoSummaryManager:
                 task.status = "completed"
                 task.progress_message = "Task completed"
             self._save_result(task)
+            self._save_task_state(task, force=True)
             if task.status == "completed":
                 task.add_log(f"Video task completed in {self._format_elapsed(self._task_elapsed_seconds(task))}")
             else:
@@ -1026,6 +1391,7 @@ class VideoSummaryManager:
             self._finish_running_steps(task, status="failed", message=task.error_message)
             self._set_download_progress(task, status="failed", message=task.error_message)
             task.add_log(f"{task.error_message} after {self._format_elapsed(self._task_elapsed_seconds(task))}")
+            self._save_task_state(task, force=True)
         except Exception as exc:
             task.status = "error"
             task.completed_at = datetime.now(LOCAL_TZ)
@@ -1033,6 +1399,7 @@ class VideoSummaryManager:
             task.progress_message = "Task failed"
             self._finish_running_steps(task, status="failed", message=task.error_message)
             task.add_log(f"{task.error_message} after {self._format_elapsed(self._task_elapsed_seconds(task))}")
+            self._save_task_state(task, force=True)
 
     def _check_cancelled(self, task: VideoTask) -> None:
         if task.cancel_requested:
@@ -1136,6 +1503,117 @@ class VideoSummaryManager:
             return None
         return None
 
+    def _task_state_path(self, task_id: str) -> Path:
+        return TASK_ROOT / task_id / TASK_STATE_FILE_NAME
+
+    def _save_task_state(self, task: VideoTask, *, force: bool = False) -> None:
+        now = time_module.monotonic()
+        if not force and task.status == "running" and now - task.last_state_save_at < 1.5:
+            return
+        task.last_state_save_at = now
+        task.task_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schema_version": 1,
+            "task_id": task.task_id,
+            "request": task.request.model_dump(mode="json"),
+            "status": task.status,
+            "started_at": task.started_at.isoformat(),
+            "completed_at": task.completed_at.isoformat() if task.completed_at else None,
+            "progress_message": task.progress_message,
+            "logs": task.logs[-500:],
+            "error_message": task.error_message,
+            "download_progress": task.download_progress.model_dump(mode="json") if task.download_progress else None,
+            "subtasks": [step.model_dump(mode="json") for step in task.subtasks],
+            "records": task.records,
+            "items": [item.model_dump(mode="json") for item in task.items],
+            "result": task.result.model_dump(mode="json") if task.result else None,
+            "updated_at": datetime.now(LOCAL_TZ).isoformat(),
+        }
+        state_path = self._task_state_path(task.task_id)
+        temp_path = state_path.with_suffix(".json.tmp")
+        try:
+            with temp_path.open("w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2, default=str)
+            temp_path.replace(state_path)
+        except Exception as exc:
+            try:
+                if temp_path.exists():
+                    temp_path.unlink()
+            except OSError:
+                pass
+            _safe_print(f"[VideoSummary][{task.task_id}] Failed to save task state: {type(exc).__name__}: {exc}")
+
+    def _load_task_from_state(self, task_id: str) -> Optional[VideoTask]:
+        state_path = self._task_state_path(task_id)
+        if not state_path.exists():
+            return None
+        try:
+            with state_path.open("r", encoding="utf-8-sig") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                return None
+            request = VideoSummaryTaskRequest.model_validate(data.get("request") or {})
+            task_dir = TASK_ROOT / task_id
+            raw_data_dir = task_dir / "raw"
+            task = VideoTask(
+                task_id=task_id,
+                request=request,
+                task_dir=task_dir,
+                raw_data_dir=raw_data_dir,
+                status=str(data.get("status") or "error"),
+                started_at=self._parse_task_datetime(data.get("started_at")) or datetime.now(LOCAL_TZ),
+                completed_at=self._parse_task_datetime(data.get("completed_at")),
+                progress_message=str(data.get("progress_message") or ""),
+                logs=[str(value) for value in (data.get("logs") or []) if value is not None][-500:],
+                error_message=str(data.get("error_message") or "") or None,
+            )
+            if task.status in {"pending", "running"}:
+                task.status = "error"
+                task.completed_at = task.completed_at or datetime.now(LOCAL_TZ)
+                task.error_message = task.error_message or "Backend process ended before task completed"
+                task.progress_message = "Task interrupted; resume is available"
+            elif task.status not in {"completed", "error"}:
+                task.status = "error"
+                task.error_message = task.error_message or "Task state file contains an unknown status"
+            if isinstance(data.get("download_progress"), dict):
+                task.download_progress = VideoDownloadProgress.model_validate(data["download_progress"])
+            task.subtasks = [
+                VideoTaskStep.model_validate(step)
+                for step in (data.get("subtasks") or [])
+                if isinstance(step, dict)
+            ][-80:]
+            task.records = [record for record in (data.get("records") or []) if isinstance(record, dict)]
+            task.items = [
+                VideoSummaryItem.model_validate(item)
+                for item in (data.get("items") or [])
+                if isinstance(item, dict)
+            ]
+            if isinstance(data.get("result"), dict):
+                task.result = VideoSummaryResult.model_validate(data["result"])
+                if not task.items:
+                    task.items = [item.model_copy(deep=True) for item in task.result.items]
+            else:
+                loaded_result = self._load_result(task_id)
+                if loaded_result:
+                    task.result = loaded_result
+                    if not task.items:
+                        task.items = [item.model_copy(deep=True) for item in loaded_result.items]
+            return task
+        except Exception as exc:
+            _safe_print(f"[VideoSummary][{task_id}] Failed to load task state: {type(exc).__name__}: {exc}")
+            return None
+
+    def _parse_task_datetime(self, value: Any) -> Optional[datetime]:
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(value))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=LOCAL_TZ)
+            return parsed
+        except ValueError:
+            return None
+
     def _filter_selected_items(self, task: VideoTask, items: List[VideoSummaryItem]) -> List[VideoSummaryItem]:
         selected_ids = {str(value).strip() for value in task.request.selected_item_ids if str(value).strip()}
         if not selected_ids:
@@ -1156,6 +1634,70 @@ class VideoSummaryManager:
             if any(alias and alias in selected_ids for alias in aliases):
                 filtered.append(item)
         return filtered
+
+    def _merge_saved_item_state(
+        self,
+        current_items: List[VideoSummaryItem],
+        saved_items: List[VideoSummaryItem],
+    ) -> List[VideoSummaryItem]:
+        if not saved_items:
+            return current_items
+        if not current_items:
+            return [item.model_copy(deep=True) for item in saved_items]
+
+        saved_by_key: Dict[str, VideoSummaryItem] = {}
+        for saved in saved_items:
+            for key in self._item_resume_keys(saved):
+                saved_by_key.setdefault(key, saved)
+
+        merged: List[VideoSummaryItem] = []
+        matched_saved_ids: set[int] = set()
+        for item in current_items:
+            saved = next((saved_by_key.get(key) for key in self._item_resume_keys(item) if saved_by_key.get(key)), None)
+            if not saved:
+                merged.append(item)
+                continue
+
+            matched_saved_ids.add(id(saved))
+            item.raw = {**saved.raw, **item.raw}
+            if saved.video_path:
+                saved_path = Path(saved.video_path)
+                if saved_path.exists() and self._local_file_has_video_stream(saved_path):
+                    item.video_path = str(saved_path)
+                    item.download_status = "existing" if saved.download_status in {"downloaded", "existing"} else saved.download_status
+            if saved.summary_status == "completed" and saved.summary:
+                item.summary = saved.summary
+                item.summary_status = "completed"
+                item.analysis_mode = saved.analysis_mode
+                item.error = ""
+            elif saved.error and item.download_status in {"downloaded", "existing"}:
+                item.error = saved.error
+            merged.append(item)
+        for saved in saved_items:
+            if id(saved) not in matched_saved_ids:
+                merged.append(saved.model_copy(deep=True))
+        return merged
+
+    def _item_resume_keys(self, item: VideoSummaryItem) -> List[str]:
+        raw = item.raw if isinstance(item.raw, dict) else {}
+        keys = [
+            item.id,
+            raw.get("video_id"),
+            raw.get("aid"),
+            raw.get("bvid"),
+            raw.get("bv_id"),
+            raw.get("note_id"),
+            raw.get("aweme_id"),
+            raw.get("photo_id"),
+            raw.get("content_id"),
+            item.url,
+        ]
+        normalized: List[str] = []
+        for key in keys:
+            value = str(key or "").strip()
+            if value and value not in normalized:
+                normalized.append(value)
+        return normalized
 
     async def _build_result(
         self,
@@ -1235,6 +1777,7 @@ class VideoSummaryManager:
                         message=message,
                     )
                     break
+        self._save_task_state(task)
 
     def _task_elapsed_seconds(self, task: VideoTask) -> float:
         end = task.completed_at or datetime.now(LOCAL_TZ)
@@ -1253,6 +1796,69 @@ class VideoSummaryManager:
         hours = minutes // 60
         minutes = minutes % 60
         return f"{hours}h {minutes}m {rest:.1f}s"
+
+    def _qwen_runtime_label(self, settings: Dict[str, Any]) -> str:
+        provider = str(settings.get("api_provider", DEFAULT_QWEN_SETTINGS["api_provider"]) or DEFAULT_QWEN_SETTINGS["api_provider"])
+        model = str(settings.get("model", DEFAULT_QWEN_SETTINGS["model"]) or DEFAULT_QWEN_SETTINGS["model"])
+        base_url = str(settings.get("base_url", DEFAULT_QWEN_SETTINGS["base_url"]) or "").rstrip("/")
+        backend = str(settings.get("video_upload_backend", DEFAULT_QWEN_SETTINGS["video_upload_backend"]) or DEFAULT_QWEN_SETTINGS["video_upload_backend"])
+        suffix = f", base_url={base_url}" if base_url else ""
+        if provider == "ollama":
+            profile = self._ollama_runtime_profile(settings)
+            suffix += (
+                f", local_ctx={profile['num_ctx']}, local_frames={profile['max_images']}, "
+                f"local_text={profile['text_context_chars']}"
+            )
+        return f"model={model}, provider={provider}, upload_backend={backend}{suffix}"
+
+    def _ollama_runtime_profile(self, settings: Dict[str, Any]) -> Dict[str, int]:
+        model = str(settings.get("model") or "").strip().lower()
+        profile = dict(OLLAMA_DEFAULT_RUNTIME_PROFILE)
+        for names, overrides in OLLAMA_MODEL_RUNTIME_PROFILES:
+            if any(name in model for name in names):
+                profile.update(overrides)
+                break
+        for key in ("num_ctx", "num_predict", "max_images", "text_context_chars"):
+            explicit_key = f"ollama_{key}"
+            if explicit_key in settings and settings.get(explicit_key) not in (None, ""):
+                try:
+                    profile[key] = int(settings[explicit_key])
+                except (TypeError, ValueError):
+                    pass
+        profile["num_ctx"] = min(32768, max(2048, int(profile["num_ctx"])))
+        profile["num_predict"] = min(4096, max(256, int(profile["num_predict"])))
+        profile["max_images"] = min(12, max(1, int(profile["max_images"])))
+        profile["text_context_chars"] = min(20000, max(1000, int(profile["text_context_chars"])))
+        return profile
+
+    def _is_ollama_provider(self, settings: Dict[str, Any]) -> bool:
+        return str(settings.get("api_provider", DEFAULT_QWEN_SETTINGS["api_provider"])) == "ollama"
+
+    def _limit_ollama_frames(self, settings: Dict[str, Any], frames: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not self._is_ollama_provider(settings):
+            return frames
+        profile = self._ollama_runtime_profile(settings)
+        limit = int(profile["max_images"])
+        if len(frames) <= limit:
+            return frames
+        if limit == 1:
+            return [frames[len(frames) // 2]]
+        indexes = [
+            int(round(index * (len(frames) - 1) / (limit - 1)))
+            for index in range(limit)
+        ]
+        unique_indexes = list(dict.fromkeys(max(0, min(len(frames) - 1, index)) for index in indexes))
+        return [frames[index] for index in unique_indexes]
+
+    def _whisper_config_label(self, task: VideoTask) -> str:
+        if not task.request.enable_whisper_transcription:
+            return "Whisper disabled"
+        model = self._normalize_whisper_model_name(task.request.whisper_model)
+        return f"Whisper enabled: openai-whisper model={model}"
+
+    def _whisper_runtime_label(self, task: VideoTask, device: str, use_fp16: bool) -> str:
+        model = self._normalize_whisper_model_name(task.request.whisper_model)
+        return f"openai-whisper model={model}, device={device}, fp16={str(use_fp16).lower()}"
 
     def _find_step(self, task: VideoTask, step_id: str) -> Optional[VideoTaskStep]:
         for step in task.subtasks:
@@ -1281,6 +1887,7 @@ class VideoSummaryManager:
             existing.completed_at = None
             existing.duration_seconds = None
             existing.message = message or existing.message
+            self._save_task_state(task)
             return existing
         step = VideoTaskStep(
             id=step_id,
@@ -1294,6 +1901,7 @@ class VideoSummaryManager:
         task.subtasks.append(step)
         if len(task.subtasks) > 80:
             task.subtasks = task.subtasks[-80:]
+        self._save_task_state(task)
         return step
 
     def _update_step(
@@ -1320,6 +1928,7 @@ class VideoSummaryManager:
             step.speed_bps = max(0.0, float(speed_bps))
         if message:
             step.message = message
+        self._save_task_state(task)
 
     def _finish_step(
         self,
@@ -1352,14 +1961,23 @@ class VideoSummaryManager:
                 "failed": "failed",
                 "skipped": "skipped",
             }.get(status, status)
-            task.add_log(f"Subtask {outcome} in {self._format_elapsed(step.duration_seconds)}: {step.label}")
+            detail = f" ({step.message})" if step.message else ""
+            task.add_log(f"Subtask {outcome} in {self._format_elapsed(step.duration_seconds)}: {step.label}{detail}")
+        self._save_task_state(task, force=True)
 
     def _finish_running_steps(self, task: VideoTask, *, status: str, message: str = "") -> None:
         for step in list(task.subtasks):
             if step.status == "running":
                 self._finish_step(task, step.id, status=status, message=message, log=False)
 
-    async def _run_crawler(self, task: VideoTask, cmd: List[str], label: str = "Crawler command") -> int:
+    async def _run_crawler(
+        self,
+        task: VideoTask,
+        cmd: List[str],
+        label: str = "Crawler command",
+        *,
+        monitor_filtered_candidates: bool = False,
+    ) -> int:
         task.add_log(f"{label}: " + self._redact_command(cmd))
 
         env = {
@@ -1376,7 +1994,7 @@ class VideoSummaryManager:
             startupinfo.wShowWindow = subprocess.SW_HIDE
             create_kwargs["startupinfo"] = startupinfo
 
-        return await asyncio.to_thread(self._run_crawler_blocking, task, cmd, env, create_kwargs)
+        return await asyncio.to_thread(self._run_crawler_blocking, task, cmd, env, create_kwargs, monitor_filtered_candidates)
 
     def _run_crawler_blocking(
         self,
@@ -1384,6 +2002,7 @@ class VideoSummaryManager:
         cmd: List[str],
         env: Dict[str, str],
         create_kwargs: Dict[str, Any],
+        monitor_filtered_candidates: bool,
     ) -> int:
         process = subprocess.Popen(
             cmd,
@@ -1399,7 +2018,9 @@ class VideoSummaryManager:
         )
         task.process = process
 
-        if process.stdout:
+        def read_stdout() -> None:
+            if not process.stdout:
+                return
             for line in process.stdout:
                 if task.cancel_requested:
                     self._terminate_process_tree(process)
@@ -1408,13 +2029,92 @@ class VideoSummaryManager:
                 if text:
                     task.add_log(text)
 
+        reader = threading.Thread(target=read_stdout, name=f"video-crawler-log-{task.task_id}", daemon=True)
+        reader.start()
+
+        early_stop_reached = False
+        last_matched_count = -1
+        while process.poll() is None:
+            if task.cancel_requested:
+                self._terminate_process_tree(process)
+                break
+            if monitor_filtered_candidates and self._crawler_filtered_early_stop_enabled(task):
+                raw_count, matched_count = self._current_filtered_candidate_counts(task)
+                if matched_count != last_matched_count:
+                    last_matched_count = matched_count
+                    if raw_count:
+                        self._update_step(
+                            task,
+                            "metadata",
+                            message=(
+                                f"matched {matched_count}/{task.request.max_videos} filtered candidate(s); "
+                                f"raw {raw_count}/{self._task_crawl_limit(task)}"
+                            ),
+                        )
+                if matched_count >= task.request.max_videos:
+                    early_stop_reached = True
+                    task.add_log(
+                        f"Filtered candidate target reached ({matched_count}/{task.request.max_videos}); "
+                        f"stopping MediaCrawler before raw cap {self._task_crawl_limit(task)}"
+                    )
+                    self._terminate_process_tree(process)
+                    break
+            time_module.sleep(1.0)
+
         exit_code = process.wait()
+        reader.join(timeout=5.0)
         task.process = None
         if task.cancel_requested:
             task.add_log("MediaCrawler process stopped by user")
             return -1
+        if early_stop_reached:
+            task.add_log("MediaCrawler process stopped after filtered candidate target was reached")
+            return 0
         task.add_log(f"MediaCrawler process exited with code {exit_code}")
         return int(exit_code or 0)
+
+    def _crawler_filtered_early_stop_enabled(self, task: VideoTask) -> bool:
+        if task.request.source_mode not in {"search", "creator"}:
+            return False
+        if task.request.workflow_mode == "selected_items":
+            return False
+        return self._task_crawl_limit(task) > max(1, int(task.request.max_videos or 1))
+
+    def _current_filtered_candidate_counts(self, task: VideoTask) -> Tuple[int, int]:
+        records = self._load_content_records(task.raw_data_dir)
+        return len(records), self._count_filtered_video_records(task, records)
+
+    def _count_filtered_video_records(
+        self,
+        task: VideoTask,
+        records: List[Dict[str, Any]],
+        *,
+        apply_date_filter: bool = True,
+    ) -> int:
+        seen: set[str] = set()
+        count = 0
+        for record in records:
+            if not self._record_matches_video_filters(task, record, apply_date_filter=apply_date_filter):
+                continue
+            key = self._record_identity(task.request.platform.value, record)
+            if key in seen:
+                continue
+            seen.add(key)
+            count += 1
+            if count >= task.request.max_videos:
+                break
+        return count
+
+    def _record_identity(self, platform: str, record: Dict[str, Any]) -> str:
+        for key in CONTENT_ID_KEYS.get(platform, []):
+            value = str(record.get(key) or "").strip()
+            if value:
+                return f"{platform}:{key}:{value}"
+        for key in URL_KEYS:
+            value = str(record.get(key) or "").strip()
+            if value:
+                return f"{platform}:url:{value}"
+        return f"{platform}:object:{hash(json.dumps(record, sort_keys=True, ensure_ascii=False, default=str))}"
 
     def _terminate_process_tree(self, process: subprocess.Popen[Any]) -> None:
         if process.poll() is not None:
@@ -1445,6 +2145,7 @@ class VideoSummaryManager:
 
     def _build_base_crawler_command(self, task: VideoTask, crawler_type: str, enable_get_medias: bool) -> List[str]:
         req = task.request
+        crawl_limit = self._task_crawl_limit(task)
         cmd = [
             "uv",
             "run",
@@ -1471,7 +2172,7 @@ class VideoSummaryManager:
             "--cdp_connect_existing",
             "false" if req.headless else "true",
             "--crawler_max_notes_count",
-            str(req.max_videos),
+            str(crawl_limit),
             "--max_concurrency_num",
             str(max(1, min(int(req.crawl_concurrency or 1), 8))),
             "--enable_get_medias",
@@ -1490,6 +2191,11 @@ class VideoSummaryManager:
         if req.cookies:
             cmd.extend(["--cookies", req.cookies])
         return cmd
+
+    def _task_crawl_limit(self, task: VideoTask) -> int:
+        requested = int(task.request.max_crawl_items or task.request.max_videos or 20)
+        filtered = int(task.request.max_videos or 20)
+        return max(1, min(max(requested, filtered), 500))
 
     def _build_creator_metadata_command(self, task: VideoTask) -> List[str]:
         cmd = self._build_base_crawler_command(task, "creator", enable_get_medias=False)
@@ -2215,9 +2921,11 @@ class VideoSummaryManager:
 
         start_dt = datetime.combine(task.request.start_date, time.min, tzinfo=LOCAL_TZ)
         end_dt = datetime.combine(task.request.end_date, time.max, tzinfo=LOCAL_TZ)
-        page_size = min(20, max(1, int(task.request.max_videos or 20)))
-        max_pages = min(10, max(1, (int(task.request.max_videos or 20) + page_size - 1) // page_size + 2))
+        crawl_limit = self._task_crawl_limit(task)
+        page_size = min(20, max(1, crawl_limit))
+        max_pages = min(25, max(1, (crawl_limit + page_size - 1) // page_size + 2))
         records: List[Dict[str, Any]] = []
+        matched_count = 0
 
         async with httpx.AsyncClient(timeout=30.0, headers=headers, follow_redirects=True, trust_env=False) as client:
             img_key, sub_key = await self._fetch_bili_wbi_keys(client)
@@ -2250,9 +2958,17 @@ class VideoSummaryManager:
                     if not record:
                         continue
                     records.append(record)
-                    if len(records) >= task.request.max_videos:
+                    if self._record_matches_video_filters(task, record):
+                        matched_count += 1
+                        if matched_count >= task.request.max_videos:
+                            task.add_log(
+                                f"Bili direct search reached filtered candidate target "
+                                f"({matched_count}/{task.request.max_videos}); stopped before raw cap {crawl_limit}"
+                            )
+                            break
+                    if len(records) >= crawl_limit:
                         break
-                if len(records) >= task.request.max_videos or len(raw_items) < page_size:
+                if matched_count >= task.request.max_videos or len(records) >= crawl_limit or len(raw_items) < page_size:
                     break
         return records
 
@@ -2348,10 +3064,12 @@ class VideoSummaryManager:
 
         records: List[Dict[str, Any]] = []
         page = 1
-        page_size = min(30, max(1, int(task.request.max_videos or 20)))
+        crawl_limit = self._task_crawl_limit(task)
+        page_size = min(30, max(1, crawl_limit))
+        matched_count = 0
         async with httpx.AsyncClient(timeout=30.0, headers=headers, follow_redirects=True, trust_env=False) as client:
             img_key, sub_key = await self._fetch_bili_wbi_keys(client)
-            while len(records) < task.request.max_videos:
+            while len(records) < crawl_limit:
                 params: Dict[str, Any] = {
                     "mid": creator_id,
                     "pn": page,
@@ -2376,11 +3094,19 @@ class VideoSummaryManager:
                         continue
                     record = self._bili_space_arc_item_to_record(raw_video, creator_id)
                     records.append(record)
-                    if len(records) >= task.request.max_videos:
+                    if self._record_matches_video_filters(task, record):
+                        matched_count += 1
+                        if matched_count >= task.request.max_videos:
+                            task.add_log(
+                                f"Bili direct creator reached filtered candidate target "
+                                f"({matched_count}/{task.request.max_videos}); stopped before raw cap {crawl_limit}"
+                            )
+                            break
+                    if len(records) >= crawl_limit:
                         break
 
                 total_count = int((data.get("page") or {}).get("count") or 0)
-                if len(records) >= total_count or len(raw_videos) < page_size:
+                if matched_count >= task.request.max_videos or len(records) >= crawl_limit or len(records) >= total_count or len(raw_videos) < page_size:
                     break
                 page += 1
             await self._enrich_bili_records_with_view_info(client, records, concurrency=4)
@@ -2554,18 +3280,14 @@ class VideoSummaryManager:
         preserve_order: bool = False,
     ) -> List[VideoSummaryItem]:
         platform = task.request.platform.value
-        start_dt = datetime.combine(task.request.start_date, time.min, tzinfo=LOCAL_TZ)
-        end_dt = datetime.combine(task.request.end_date, time.max, tzinfo=LOCAL_TZ)
 
         items: List[VideoSummaryItem] = []
         for record in records:
             ranking_item_type = str(record.get("ranking_item_type") or "")
             is_ranking_list_item = task.request.source_mode == "ranking" and ranking_item_type in {"topic", "question"}
-            if not self._is_video_record(platform, record) and not is_ranking_list_item:
+            if not self._record_matches_video_filters(task, record, apply_date_filter=apply_date_filter):
                 continue
             published_dt = self._get_published_datetime(record)
-            if apply_date_filter and (not published_dt or not (start_dt <= published_dt <= end_dt)):
-                continue
 
             content_id = (
                 self._first_value(record, CONTENT_ID_KEYS.get(platform, []))
@@ -2577,6 +3299,12 @@ class VideoSummaryManager:
             title = self._first_value(record, TITLE_KEYS)
             desc = self._first_value(record, DESC_KEYS)
             url = self._first_value(record, URL_KEYS)
+            cover = self._first_url_value(record, COVER_KEYS)
+            if cover:
+                if not record.get("cover"):
+                    record["cover"] = cover
+                if not record.get("video_cover_url"):
+                    record["video_cover_url"] = cover
 
             item = VideoSummaryItem(
                 id=str(content_id),
@@ -2600,6 +3328,28 @@ class VideoSummaryManager:
             items.sort(key=lambda item: item.published_at or "", reverse=True)
         return items
 
+    def _record_matches_video_filters(
+        self,
+        task: VideoTask,
+        record: Dict[str, Any],
+        *,
+        apply_date_filter: bool = True,
+    ) -> bool:
+        platform = task.request.platform.value
+        ranking_item_type = str(record.get("ranking_item_type") or "")
+        is_ranking_list_item = task.request.source_mode == "ranking" and ranking_item_type in {"topic", "question"}
+        if not self._is_video_record(platform, record) and not is_ranking_list_item:
+            return False
+        if apply_date_filter:
+            published_dt = self._get_published_datetime(record)
+            if not published_dt:
+                return False
+            start_dt = datetime.combine(task.request.start_date, time.min, tzinfo=LOCAL_TZ)
+            end_dt = datetime.combine(task.request.end_date, time.max, tzinfo=LOCAL_TZ)
+            if not (start_dt <= published_dt <= end_dt):
+                return False
+        return True
+
     def _should_defer_download_until_summary(self, task: VideoTask) -> bool:
         return bool(task.request.summarize)
 
@@ -2608,6 +3358,8 @@ class VideoSummaryManager:
             self._check_cancelled(task)
             task.progress_message = f"Downloading matched video {index}/{len(items)}"
             await self._attach_or_download_video(task, item, item.raw)
+            task.items = items
+            self._save_task_state(task, force=True)
 
         native_items = [
             item
@@ -3122,14 +3874,14 @@ class VideoSummaryManager:
                             downloaded_bytes=partial_bytes,
                             total_bytes=total_bytes,
                             message=(
-                                f"Direct URL returned HTTP {status_code}; refreshing source URL"
+                                f"Direct URL returned HTTP {status_code}; source URL is rejected or expired"
                                 if stale_direct_url
                                 else f"Download interrupted; retrying with Range ({attempt}/{max_attempts})"
                             ),
                         )
                         if stale_direct_url:
                             task.add_log(
-                                f"Direct video URL rejected for {content_id}: HTTP {status_code}; refreshing source URL"
+                                f"Direct video URL rejected for {content_id}: HTTP {status_code}; source URL is rejected or expired"
                             )
                             break
                         if attempt < max_attempts:
@@ -3373,15 +4125,28 @@ class VideoSummaryManager:
             return urls, referer
 
     async def _download_bili_public_video(self, task: VideoTask, item: VideoSummaryItem) -> Optional[Path]:
-        try:
-            urls, referer = await self._fetch_bili_public_video_urls(task, item)
-            if not urls:
-                return None
-            task.add_log(f"Downloading Bili public low-quality video for {item.id}")
-            return await self._download_direct_video(task, item.id, "bili", urls, referer=referer)
-        except Exception as exc:
-            task.add_log(f"Bili public video download failed for {item.id}: {type(exc).__name__}: {exc}")
-            return None
+        last_error = ""
+        for refresh_attempt in range(1, 4):
+            try:
+                urls, referer = await self._fetch_bili_public_video_urls(task, item)
+                if not urls:
+                    return None
+                if refresh_attempt > 1:
+                    task.add_log(f"Refreshed Bili playurl for {item.id} (attempt {refresh_attempt}/3)")
+                task.add_log(f"Downloading Bili public low-quality video for {item.id}")
+                downloaded = await self._download_direct_video(task, item.id, "bili", urls, referer=referer)
+                if downloaded:
+                    return downloaded
+                last_error = "direct downloader returned no file"
+            except Exception as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
+                task.add_log(f"Bili public video download failed for {item.id}: {last_error}")
+            if refresh_attempt < 3:
+                task.add_log(f"Re-resolving Bili playurl for {item.id} after failed download")
+                await asyncio.sleep(1.5 * refresh_attempt)
+        if last_error:
+            task.add_log(f"Bili public video download exhausted refreshed playurls for {item.id}: {last_error}")
+        return None
 
     def _bili_playurl_candidates(self, durl_value: Any) -> List[str]:
         if not isinstance(durl_value, list):
@@ -3417,7 +4182,12 @@ class VideoSummaryManager:
             return
 
         settings = self._runtime_qwen_settings(task)
-        if not settings.get("api_key"):
+        api_provider = str(settings.get("api_provider", DEFAULT_QWEN_SETTINGS["api_provider"]))
+        video_input_mode = str(settings.get("video_input_mode", DEFAULT_QWEN_SETTINGS["video_input_mode"]))
+        qwen_label = self._qwen_runtime_label(settings)
+        whisper_label = self._whisper_config_label(task)
+        task.add_log(f"Video analysis runtime: {qwen_label}; {whisper_label}")
+        if api_provider != "ollama" and not settings.get("api_key"):
             for item in items:
                 item.summary_status = "skipped"
                 item.error = item.error or "尚未配置 Qwen API Key。"
@@ -3426,10 +4196,13 @@ class VideoSummaryManager:
 
         for index, item in enumerate(items, start=1):
             self._check_cancelled(task)
-            task.progress_message = f"Summarizing video {index}/{len(items)}"
+            if item.summary_status == "completed" and item.summary:
+                task.add_log(f"Skipping already summarized video {item.id}")
+                continue
+            task.progress_message = f"Summarizing video {index}/{len(items)} with {qwen_label}"
             try:
                 context_sources = await self._collect_text_sources(task, item)
-                if not item.video_path:
+                if not item.video_path and video_input_mode in {"auto", "video"}:
                     try:
                         source_summary = await self._try_source_url_video_summary(task, settings, item, context_sources)
                         if source_summary:
@@ -3443,7 +4216,7 @@ class VideoSummaryManager:
                     except Exception as exc:
                         task.add_log(f"Source URL direct Qwen input failed for {item.id}: {type(exc).__name__}: {exc}")
 
-                if not item.video_path:
+                if not item.video_path and video_input_mode in {"auto", "video"}:
                     try:
                         remote_oss_summary = await self._try_remote_oss_video_summary(task, settings, item, context_sources)
                         if remote_oss_summary:
@@ -3457,7 +4230,7 @@ class VideoSummaryManager:
                     except Exception as exc:
                         task.add_log(f"Remote stream OSS Qwen input failed for {item.id}: {type(exc).__name__}: {exc}")
 
-                if self._has_substantial_text_source(context_sources) and not item.video_path:
+                if self._has_substantial_text_source(context_sources) and not item.video_path and video_input_mode in {"auto", "text_first"}:
                     await self._summarize_from_text_sources(task, settings, item, context_sources)
                     continue
 
@@ -3474,7 +4247,7 @@ class VideoSummaryManager:
                     task.add_log(f"Using text context for visual analysis of {item.id}: {', '.join(label for label, _ in context_sources)}")
 
                 if not item.video_path:
-                    if self._has_substantial_text_source(context_sources):
+                    if self._has_substantial_text_source(context_sources) and video_input_mode in {"auto", "text_first"}:
                         await self._summarize_from_text_sources(task, settings, item, context_sources)
                         continue
                     await self._ensure_item_video_prepared(task, item)
@@ -3492,16 +4265,17 @@ class VideoSummaryManager:
                     item.error = "本地媒体文件不是有效视频：未检测到视频流。"
                     task.add_log(f"Skipping video analysis for {item.id}: local media has no video stream")
                     continue
-                task.progress_message = f"Analyzing video {index}/{len(items)} with Qwen-VL"
-                try:
-                    item.summary, item.analysis_mode = await self._call_qwen_direct_video_summary(task, settings, item, video_path, context_sources)
-                    item.summary_status = "completed"
-                    task.add_log(f"Summarized video {item.id} with {item.analysis_mode} input")
-                    continue
-                except Exception as exc:
-                    task.add_log(
-                        f"Direct video input failed for {item.id}; falling back to frames: {type(exc).__name__}: {exc}"
-                    )
+                task.progress_message = f"Analyzing video {index}/{len(items)} with {qwen_label}"
+                if video_input_mode != "frames":
+                    try:
+                        item.summary, item.analysis_mode = await self._call_qwen_direct_video_summary(task, settings, item, video_path, context_sources)
+                        item.summary_status = "completed"
+                        task.add_log(f"Summarized video {item.id} with {item.analysis_mode} input")
+                        continue
+                    except Exception as exc:
+                        task.add_log(
+                            f"Direct video input failed for {item.id} using {qwen_label}; falling back to frames: {type(exc).__name__}: {exc}"
+                        )
 
                 frames = await asyncio.to_thread(
                     self._sample_video_frames,
@@ -3516,8 +4290,22 @@ class VideoSummaryManager:
                         item.error = "无法从本地视频文件抽取画面。"
                     continue
 
-                task.progress_message = f"Analyzing sampled frames {index}/{len(items)} with Qwen-VL"
-                item.summary = await self._call_qwen_frame_summary(settings, item, frames, context_sources)
+                task.progress_message = f"Analyzing sampled frames {index}/{len(items)} with {qwen_label}"
+                frame_step_id = f"qwen_frames:{item.id}"
+                self._start_step(task, frame_step_id, f"Qwen sampled-frame analysis {item.id}", phase="qwen", item_id=item.id, message=qwen_label)
+                try:
+                    item.summary = await self._call_qwen_frame_summary(settings, item, frames, context_sources)
+                    self._finish_step(task, frame_step_id)
+                except Exception as exc:
+                    self._finish_step(task, frame_step_id, status="failed", message=f"{qwen_label}; {type(exc).__name__}: {exc}")
+                    if self._has_substantial_text_source(context_sources):
+                        task.add_log(
+                            f"Sampled-frame analysis failed for {item.id}; "
+                            f"using available text context instead: {type(exc).__name__}: {exc}"
+                        )
+                        await self._summarize_from_text_sources(task, settings, item, context_sources)
+                        continue
+                    raise
                 item.summary_status = "completed"
                 item.analysis_mode = "frames"
                 task.add_log(f"Summarized video {item.id}")
@@ -3525,6 +4313,9 @@ class VideoSummaryManager:
                 item.summary_status = "failed"
                 item.error = f"{type(exc).__name__}: {exc}"
                 task.add_log(f"Qwen summary failed for {item.id}: {item.error}")
+            finally:
+                task.items = items
+                self._save_task_state(task, force=True)
 
     async def _try_text_first_summary(self, task: VideoTask, settings: Dict[str, Any], item: VideoSummaryItem) -> bool:
         sources = await self._collect_text_sources(task, item)
@@ -3543,13 +4334,26 @@ class VideoSummaryManager:
             task.add_log(f"Only title/short description available for {item.id}; falling back to video analysis")
             return False
 
-        prompt = self._text_first_prompt(item, sources)
-        item.summary = await self._call_qwen_text(settings, prompt)
+        prompt = self._text_first_prompt(
+            item,
+            sources,
+            max_chars=self._ollama_runtime_profile(settings)["text_context_chars"] if self._is_ollama_provider(settings) else 12000,
+        )
+        qwen_label = self._qwen_runtime_label(settings)
+        step_id = f"qwen_text_first:{item.id}"
+        task.progress_message = f"Summarizing text-first context for {item.id} with {qwen_label}"
+        self._start_step(task, step_id, f"Qwen text-first analysis {item.id}", phase="qwen", item_id=item.id, message=qwen_label)
+        try:
+            item.summary = await self._call_qwen_text(settings, prompt)
+            self._finish_step(task, step_id)
+        except Exception as exc:
+            self._finish_step(task, step_id, status="failed", message=f"{qwen_label}; {type(exc).__name__}: {exc}")
+            raise
         item.summary_status = "completed"
         item.analysis_mode = "whisper_text" if any(label == "Whisper 转录" for label, _ in sources) else "text"
         if not item.video_path:
             item.download_status = "skipped"
-        task.add_log(f"Summarized video {item.id} with text-first input")
+        task.add_log(f"Summarized video {item.id} with text-first input using {qwen_label}")
         return True
 
     async def _summarize_from_text_sources(
@@ -3565,14 +4369,26 @@ class VideoSummaryManager:
         if self._only_short_metadata_sources(sources):
             raise RuntimeError("Only title/short description available; refusing text-only summary")
 
-        task.progress_message = f"Summarizing text context for {item.id}"
-        prompt = self._text_first_prompt(item, sources)
-        item.summary = await self._call_qwen_text(settings, prompt)
+        qwen_label = self._qwen_runtime_label(settings)
+        task.progress_message = f"Summarizing text context for {item.id} with {qwen_label}"
+        prompt = self._text_first_prompt(
+            item,
+            sources,
+            max_chars=self._ollama_runtime_profile(settings)["text_context_chars"] if self._is_ollama_provider(settings) else 12000,
+        )
+        step_id = f"qwen_text:{item.id}"
+        self._start_step(task, step_id, f"Qwen text-context analysis {item.id}", phase="qwen", item_id=item.id, message=qwen_label)
+        try:
+            item.summary = await self._call_qwen_text(settings, prompt)
+            self._finish_step(task, step_id)
+        except Exception as exc:
+            self._finish_step(task, step_id, status="failed", message=f"{qwen_label}; {type(exc).__name__}: {exc}")
+            raise
         item.summary_status = "completed"
         item.analysis_mode = "whisper_text" if any(label == "Whisper 转录" for label, _ in sources) else "text"
         if not item.video_path:
             item.download_status = "skipped"
-        task.add_log(f"Summarized video {item.id} with text-first input")
+        task.add_log(f"Summarized video {item.id} with text-first input using {qwen_label}")
 
     async def _collect_text_sources(self, task: VideoTask, item: VideoSummaryItem) -> List[Tuple[str, str]]:
         sources: List[Tuple[str, str]] = []
@@ -3647,7 +4463,14 @@ class VideoSummaryManager:
 
         task.progress_message = f"Extracting audio for {item.id}"
         extract_step_id = f"whisper_audio:{item.id}"
-        self._start_step(task, extract_step_id, f"提取音频 {item.id}", phase="transcribe", item_id=item.id)
+        self._start_step(
+            task,
+            extract_step_id,
+            f"提取音频 {item.id}",
+            phase="transcribe",
+            item_id=item.id,
+            message=f"for {self._whisper_config_label(task)}",
+        )
         try:
             audio_path = await asyncio.to_thread(self._extract_audio_for_whisper, task, item, video_path)
             self._finish_step(task, extract_step_id)
@@ -3655,13 +4478,12 @@ class VideoSummaryManager:
             self._finish_step(task, extract_step_id, status="failed", message=f"{type(exc).__name__}: {exc}")
             raise
         self._check_cancelled(task)
-        task.progress_message = f"Transcribing audio for {item.id}"
         device, use_fp16 = self._torch_whisper_runtime()
-        task.add_log(
-            f"Whisper transcription runtime for {item.id}: openai-whisper {device}/fp16={str(use_fp16).lower()}, model {task.request.whisper_model}"
-        )
+        whisper_runtime = self._whisper_runtime_label(task, device, use_fp16)
+        task.progress_message = f"Transcribing audio for {item.id} with {whisper_runtime}"
+        task.add_log(f"Whisper transcription runtime for {item.id}: {whisper_runtime}")
         transcribe_step_id = f"whisper_transcribe:{item.id}"
-        self._start_step(task, transcribe_step_id, f"Whisper 转录 {item.id}", phase="transcribe", item_id=item.id, message=task.request.whisper_model)
+        self._start_step(task, transcribe_step_id, f"Whisper 转录 {item.id}", phase="transcribe", item_id=item.id, message=whisper_runtime)
         try:
             transcript = await asyncio.to_thread(
                 self._transcribe_audio_with_whisper,
@@ -4078,7 +4900,7 @@ class VideoSummaryManager:
             unique.append((label, clean[:12000]))
         return unique
 
-    def _text_first_prompt(self, item: VideoSummaryItem, sources: List[Tuple[str, str]]) -> str:
+    def _text_first_prompt(self, item: VideoSummaryItem, sources: List[Tuple[str, str]], max_chars: int = 12000) -> str:
         metadata = {
             "id": item.id,
             "title": item.title,
@@ -4087,10 +4909,7 @@ class VideoSummaryManager:
             "url": item.url,
             "text_sources": [label for label, _ in sources],
         }
-        source_text = "\n\n".join(
-            f"### {label}\n{text}"
-            for label, text in sources
-        )
+        source_text = self._format_text_context_for_prompt(sources, max_chars=max_chars)
         return (
             "你是视频内容分析助手。下面不是完整视频画面，而是按优先级收集到的文本材料，"
             "可能包括字幕、平台 AI 总结、Whisper 转录、标题和描述。请只基于材料中有依据的信息写中文 Markdown 报告。"
@@ -4122,13 +4941,24 @@ class VideoSummaryManager:
             return f"共匹配到 {len(items)} 条视频记录，但没有生成 Qwen-VL 总结。"
 
         settings = self._runtime_qwen_settings(task)
-        if not settings.get("api_key"):
+        if not self._is_ollama_provider(settings) and not settings.get("api_key"):
+            return self._fallback_aggregate_summary(completed)
+        model_name = str(settings.get("model") or "").lower()
+        if self._is_ollama_provider(settings) and any(token in model_name for token in ("qwen3-vl", "qwen3vl")):
+            task.add_log(
+                "Using deterministic aggregate summary for local Qwen3-VL because this Ollama model returns "
+                "thinking-only content for text-only chat on the current runtime."
+            )
             return self._fallback_aggregate_summary(completed)
 
         summaries_text = "\n\n".join(
             f"{idx}. {item.title or item.id}\nPublished: {item.published_at}\nSummary: {item.summary}"
             for idx, item in enumerate(completed, start=1)
         )
+        if self._is_ollama_provider(settings):
+            max_chars = self._ollama_runtime_profile(settings)["text_context_chars"]
+            if len(summaries_text) > max_chars:
+                summaries_text = summaries_text[:max_chars].rstrip() + "\n[truncated for local Ollama context]"
         prompt = (
             "请基于下面这些单视频摘要，用中文输出一个信息充足、排版清楚的整体总结。"
             "必须使用 Markdown，并严格按以下结构组织；小标题必须加粗，正文尽量使用自然段，不要堆太多分点。\n\n"
@@ -4163,7 +4993,7 @@ class VideoSummaryManager:
         settings = self._load_settings(include_secret=True)
         settings.update(
             {
-                "video_input_mode": "auto",
+                "video_input_mode": task.request.video_input_mode,
                 "video_upload_backend": task.request.video_upload_backend,
                 "video_fps": task.request.video_fps,
                 "sample_frames": task.request.sample_frames,
@@ -4191,11 +5021,12 @@ class VideoSummaryManager:
             return ""
 
         errors: List[str] = []
+        qwen_label = self._qwen_runtime_label(settings)
         for url_index, url in enumerate(urls[:3], start=1):
             self._check_cancelled(task)
             host = urlparse(url).netloc or "unknown-host"
             step_id = f"source_url:{item.id}:{url_index}"
-            self._start_step(task, step_id, f"尝试源 URL 直传 Qwen {item.id}", phase="qwen", item_id=item.id, message=host)
+            self._start_step(task, step_id, f"尝试源 URL 直传 Qwen {item.id}", phase="qwen", item_id=item.id, message=f"{qwen_label}; host={host}")
             probe = await self._probe_public_source_video_url(url)
             if not probe["ok"]:
                 reason = str(probe.get("reason") or "")
@@ -4205,7 +5036,7 @@ class VideoSummaryManager:
                     continue
                 task.add_log(f"Source URL probe inconclusive for {item.id}: {host} ({reason}); trying Qwen direct URL anyway")
             try:
-                task.add_log(f"Trying Qwen source video URL input for {item.id}: {host}")
+                task.add_log(f"Trying Qwen source video URL input for {item.id}: {host}; {qwen_label}")
                 summary = await self._call_qwen_source_url_video_summary(
                     settings,
                     item,
@@ -4219,8 +5050,8 @@ class VideoSummaryManager:
             except Exception as exc:
                 message = f"{host}: {type(exc).__name__}: {exc}"
                 errors.append(message)
-                self._finish_step(task, step_id, status="failed", message=message)
-                task.add_log(f"Qwen source video URL failed for {item.id}: {message}")
+                self._finish_step(task, step_id, status="failed", message=f"{qwen_label}; {message}")
+                task.add_log(f"Qwen source video URL failed for {item.id} using {qwen_label}: {message}")
         if errors:
             raise RuntimeError("; ".join(errors))
         return ""
@@ -4432,7 +5263,14 @@ class VideoSummaryManager:
                 item.raw["qwen_remote_oss_object"] = object_key
                 item.raw["qwen_source_video_url_host"] = host
                 qwen_step_id = f"qwen_remote_oss:{item.id}"
-                self._start_step(task, qwen_step_id, f"Qwen 读取远程转存 OSS 视频并分析 {item.id}", phase="qwen", item_id=item.id)
+                self._start_step(
+                    task,
+                    qwen_step_id,
+                    f"Qwen 读取远程转存 OSS 视频并分析 {item.id}",
+                    phase="qwen",
+                    item_id=item.id,
+                    message=self._qwen_runtime_label(settings),
+                )
                 try:
                     summary = await self._call_qwen_video_url_summary(settings, item, public_url, context_sources, size_mb, metadata_extra)
                     self._finish_step(task, qwen_step_id)
@@ -4442,10 +5280,15 @@ class VideoSummaryManager:
             except Exception as exc:
                 qwen_step = self._find_step(task, f"qwen_remote_oss:{item.id}")
                 if qwen_step and qwen_step.status == "running":
-                    self._finish_step(task, qwen_step.id, status="failed", message=f"{type(exc).__name__}: {exc}")
+                    self._finish_step(
+                        task,
+                        qwen_step.id,
+                        status="failed",
+                        message=f"{self._qwen_runtime_label(settings)}; {type(exc).__name__}: {exc}",
+                    )
                 message = f"{host}: {type(exc).__name__}: {exc}"
                 errors.append(message)
-                task.add_log(f"Remote stream OSS failed for {item.id}: {message}")
+                task.add_log(f"Remote stream OSS failed for {item.id} using {self._qwen_runtime_label(settings)}: {message}")
                 if upload_attempts >= max_upload_attempts:
                     task.add_log(
                         f"Remote stream OSS stopped for {item.id} after {upload_attempts} upload attempt(s); "
@@ -4644,6 +5487,8 @@ class VideoSummaryManager:
     ) -> Tuple[str, str]:
         backend = str(settings.get("video_upload_backend", DEFAULT_QWEN_SETTINGS["video_upload_backend"]))
         api_provider = str(settings.get("api_provider", DEFAULT_QWEN_SETTINGS["api_provider"]))
+        if api_provider == "ollama":
+            raise RuntimeError("Ollama provider does not support direct video files or video URLs; sampled-frame image analysis is required.")
         errors: List[str] = []
         duration_limit_seconds = self._public_url_video_duration_limit_seconds(settings)
         duration_seconds = self._probe_video_duration_seconds(video_path) or self._item_duration_seconds(item)
@@ -4684,7 +5529,7 @@ class VideoSummaryManager:
 
         if backend in {"auto", "openai"}:
             try:
-                summary = await self._call_qwen_base64_video_summary(settings, item, video_path, context_sources)
+                summary = await self._call_qwen_base64_video_summary(task, settings, item, video_path, context_sources)
                 return summary, "base64_video"
             except Exception as exc:
                 message = f"OpenAI-compatible base64 video failed: {type(exc).__name__}: {exc}"
@@ -4717,13 +5562,20 @@ class VideoSummaryManager:
             },
         ]
         step_id = f"qwen_oss:{item.id}"
-        self._start_step(task, step_id, f"Qwen 读取 OSS 视频并分析 {item.id}", phase="qwen", item_id=item.id)
+        self._start_step(
+            task,
+            step_id,
+            f"Qwen 读取 OSS 视频并分析 {item.id}",
+            phase="qwen",
+            item_id=item.id,
+            message=self._qwen_runtime_label(settings),
+        )
         try:
             summary = await self._call_qwen(settings, content)
             self._finish_step(task, step_id)
             return summary
         except Exception as exc:
-            self._finish_step(task, step_id, status="failed", message=f"{type(exc).__name__}: {exc}")
+            self._finish_step(task, step_id, status="failed", message=f"{self._qwen_runtime_label(settings)}; {type(exc).__name__}: {exc}")
             raise
         finally:
             await self._cleanup_oss_object_after_analysis(task, settings, object_key, item.id, "local OSS upload")
@@ -5173,11 +6025,29 @@ class VideoSummaryManager:
         ]
 
         last_error: Optional[Exception] = None
+        qwen_label = self._qwen_runtime_label(settings)
+        step_id = f"qwen_dashscope:{item.id}:{self._safe_item_id(upload_path.stem)}"
+        self._start_step(
+            task,
+            step_id,
+            f"DashScope SDK video analysis {item.id}",
+            phase="qwen",
+            item_id=item.id,
+            message=f"{qwen_label}; file={upload_path.name}",
+        )
         for attempt in range(1, retry_count + 1):
             self._check_cancelled(task)
+            self._update_step(
+                task,
+                step_id,
+                progress_percent=((attempt - 1) / retry_count) * 100,
+                transferred_bytes=attempt - 1,
+                total_bytes=retry_count,
+                message=f"{qwen_label}; attempt {attempt}/{retry_count}; file={upload_path.name}",
+            )
             task.add_log(
                 f"DashScope local video upload attempt {attempt}/{retry_count} for {item.id}: "
-                f"{upload_path.name} ({upload_size_mb:.1f}MB)"
+                f"{upload_path.name} ({upload_size_mb:.1f}MB); {qwen_label}"
             )
             try:
                 response = dashscope.MultiModalConversation.call(
@@ -5185,7 +6055,9 @@ class VideoSummaryManager:
                     model=settings.get("model", DEFAULT_QWEN_SETTINGS["model"]),
                     messages=messages,
                 )
-                return self._extract_dashscope_message_text(response)
+                summary = self._extract_dashscope_message_text(response)
+                self._finish_step(task, step_id, message=f"{qwen_label}; file={upload_path.name}")
+                return summary
             except Exception as exc:
                 self._check_cancelled(task)
                 last_error = exc
@@ -5199,7 +6071,9 @@ class VideoSummaryManager:
                 time_module.sleep(delay)
 
         if last_error:
+            self._finish_step(task, step_id, status="failed", message=f"{qwen_label}; {type(last_error).__name__}: {last_error}")
             raise last_error
+        self._finish_step(task, step_id, status="failed", message=f"{qwen_label}; unknown failure")
         raise RuntimeError("DashScope local video upload failed without an exception")
 
     def _compress_video_for_dashscope(
@@ -5333,6 +6207,7 @@ class VideoSummaryManager:
 
     async def _call_qwen_base64_video_summary(
         self,
+        task: VideoTask,
         settings: Dict[str, Any],
         item: VideoSummaryItem,
         video_path: Path,
@@ -5361,7 +6236,16 @@ class VideoSummaryManager:
                 "fps": float(settings.get("video_fps", DEFAULT_QWEN_SETTINGS["video_fps"])),
             },
         ]
-        return await self._call_qwen(settings, content)
+        step_id = f"qwen_base64:{item.id}"
+        qwen_label = self._qwen_runtime_label(settings)
+        self._start_step(task, step_id, f"Qwen Base64 video analysis {item.id}", phase="qwen", item_id=item.id, message=qwen_label)
+        try:
+            summary = await self._call_qwen(settings, content)
+            self._finish_step(task, step_id)
+            return summary
+        except Exception as exc:
+            self._finish_step(task, step_id, status="failed", message=f"{qwen_label}; {type(exc).__name__}: {exc}")
+            raise
 
     def _video_prompt_metadata(self, item: VideoSummaryItem, video_size_mb: float) -> Dict[str, Any]:
         return {
@@ -5481,6 +6365,9 @@ class VideoSummaryManager:
         frames: List[Dict[str, Any]],
         context_sources: List[Tuple[str, str]],
     ) -> str:
+        requested_frame_count = len(frames)
+        ollama_profile = self._ollama_runtime_profile(settings) if self._is_ollama_provider(settings) else None
+        frames = self._limit_ollama_frames(settings, frames)
         frame_points = [
             {
                 "index": index,
@@ -5496,7 +6383,17 @@ class VideoSummaryManager:
             "url": item.url,
             "sampled_frames": frame_points,
         }
-        text_context = self._format_text_context_for_prompt(context_sources)
+        if ollama_profile and requested_frame_count != len(frames):
+            metadata["local_ollama_limits"] = {
+                "requested_frames": requested_frame_count,
+                "sent_frames": len(frames),
+                "num_ctx": ollama_profile["num_ctx"],
+                "text_context_chars": ollama_profile["text_context_chars"],
+            }
+        text_context = self._format_text_context_for_prompt(
+            context_sources,
+            max_chars=ollama_profile["text_context_chars"] if ollama_profile else 12000,
+        )
         prompt = (
             "你是视频内容分析助手。下面是同一条视频按时间顺序抽取的关键画面，以及爬虫得到的元信息。"
             "请用中文输出信息充足的 Markdown 报告，固定使用以下加粗小标题：\n\n"
@@ -5517,6 +6414,11 @@ class VideoSummaryManager:
             "但画面证据优先，文本与画面冲突时请明确指出。不要编造画面或文本中没有的事实。\n\n"
             f"元信息：{json.dumps(metadata, ensure_ascii=False)}"
         )
+        if ollama_profile and requested_frame_count != len(frames):
+            prompt += (
+                "\n\n本地 Ollama 模型上下文有限，系统已按时间均匀抽取 "
+                f"{len(frames)}/{requested_frame_count} 帧进行分析。"
+            )
         if text_context:
             prompt += f"\n\n可用文本上下文：\n{text_context}"
         content: List[Dict[str, Any]] = [
@@ -5549,6 +6451,8 @@ class VideoSummaryManager:
         api_provider = str(settings.get("api_provider", DEFAULT_QWEN_SETTINGS["api_provider"]))
         if api_provider not in QWEN_API_PROVIDERS:
             raise RuntimeError(f"Unsupported video analysis API provider: {api_provider}")
+        if api_provider == "ollama":
+            return await self._call_ollama(settings, content)
         base_url = self._chat_completions_base_url(settings)
         url = f"{base_url}/chat/completions"
         model = str(settings.get("model", DEFAULT_QWEN_SETTINGS["model"]) or DEFAULT_QWEN_SETTINGS["model"])
@@ -5604,6 +6508,102 @@ class VideoSummaryManager:
         if not text:
             raise RuntimeError("Streaming Qwen response did not contain text content.")
         return text
+
+    async def _call_ollama(self, settings: Dict[str, Any], content: List[Dict[str, Any]]) -> str:
+        base_url = str(settings.get("base_url") or "http://127.0.0.1:11434").rstrip("/")
+        if base_url.endswith("/v1"):
+            base_url = base_url[:-3]
+        url = f"{base_url}/api/chat"
+        model = str(settings.get("model") or "qwen3-vl:8b")
+        profile = self._ollama_runtime_profile(settings)
+        prompt, images = self._ollama_content_parts(content)
+        prompt = (
+            "你必须使用中文回答，除非用户明确要求其他语言。"
+            "不要输出思考过程；如果只能从少量抽帧判断，请明确说明不确定性。\n\n"
+            f"{prompt}"
+        )
+        payload = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt,
+                    **({"images": images} if images else {}),
+                }
+            ],
+            "stream": False,
+            "think": False,
+            "options": {
+                "temperature": 0.2,
+                "num_ctx": int(profile["num_ctx"]),
+                "num_predict": int(profile["num_predict"]),
+            },
+        }
+        async with httpx.AsyncClient(timeout=900.0, trust_env=False) as client:
+            response = await client.post(url, json=payload)
+            if response.status_code >= 400:
+                body = response.text.strip()
+                detail = body[:1200] if body else response.reason_phrase
+                raise RuntimeError(f"Ollama API {response.status_code} for model {model}: {detail}")
+            data = response.json()
+        message = data.get("message") if isinstance(data, dict) else None
+        text = ""
+        if isinstance(message, dict):
+            text = str(message.get("content") or "").strip()
+        if not text and isinstance(data, dict):
+            text = str(data.get("response") or "").strip()
+        if not text:
+            raise RuntimeError(f"Ollama response did not contain text content: {data}")
+        return text
+
+    def _ollama_content_parts(self, content: List[Dict[str, Any]]) -> Tuple[str, List[str]]:
+        texts: List[str] = []
+        images: List[str] = []
+        unsupported: List[str] = []
+        for part in content:
+            part_type = str(part.get("type") or "")
+            if part_type == "text":
+                text = str(part.get("text") or "")
+                if text:
+                    texts.append(text)
+                continue
+            if part_type == "image_url":
+                image_url = part.get("image_url")
+                url = ""
+                if isinstance(image_url, dict):
+                    url = str(image_url.get("url") or "")
+                elif isinstance(image_url, str):
+                    url = image_url
+                encoded = self._extract_data_url_base64(url, expected_prefix="data:image/")
+                if not encoded:
+                    unsupported.append("non-base64 image_url")
+                    continue
+                images.append(encoded)
+                continue
+            if part_type == "video_url":
+                unsupported.append("video_url")
+                continue
+            if part_type:
+                unsupported.append(part_type)
+
+        if unsupported:
+            raise RuntimeError(
+                "Ollama provider only supports text and sampled image frames in this workbench; "
+                f"unsupported content: {', '.join(sorted(set(unsupported)))}"
+            )
+        prompt = "\n\n".join(text.strip() for text in texts if text.strip()).strip()
+        if not prompt:
+            prompt = "请分析随请求提供的图片内容。"
+        return prompt, images
+
+    def _extract_data_url_base64(self, url: str, *, expected_prefix: str) -> str:
+        url = str(url or "").strip()
+        if not url.startswith(expected_prefix):
+            return ""
+        marker = ";base64,"
+        if marker not in url:
+            return ""
+        return url.split(marker, 1)[1].strip()
 
     def _extract_openai_stream_text(self, data: Dict[str, Any]) -> List[str]:
         parts: List[str] = []
@@ -5761,6 +6761,7 @@ class VideoSummaryManager:
         result_path = task.task_dir / "result.json"
         with result_path.open("w", encoding="utf-8") as f:
             json.dump(task.result.model_dump(mode="json"), f, ensure_ascii=False, indent=2)
+        self._save_task_state(task, force=True)
 
     def _load_settings(self, include_secret: bool = False) -> Dict[str, Any]:
         store = self._load_profile_store(include_secret=include_secret)
@@ -5888,7 +6889,10 @@ class VideoSummaryManager:
         return normalized
 
     def _infer_api_provider(self, base_url: str) -> str:
-        hostname = urlparse(str(base_url or "")).hostname or ""
+        parsed = urlparse(str(base_url or ""))
+        hostname = parsed.hostname or ""
+        if hostname in {"127.0.0.1", "localhost", "::1"} and parsed.port == 11434:
+            return "ollama"
         return "dashscope" if hostname.endswith("dashscope.aliyuncs.com") else "openai_compatible"
 
     def _apply_profile_request(self, profile: Dict[str, Any], request: QwenSettingsRequest) -> None:
@@ -6219,7 +7223,8 @@ class VideoSummaryManager:
         task_updates: Dict[str, Any] = {
             "selected_item_ids": selected_item_ids,
             "source_task_id": str(request.source_task_id or "").strip() or None,
-            "video_input_mode": "auto",
+            "video_input_mode": request.video_input_mode,
+            "max_crawl_items": max(int(request.max_crawl_items or 0), int(request.max_videos or 0), 1),
             **self._normalized_crawl_timing_updates(request),
         }
 
@@ -6261,6 +7266,7 @@ class VideoSummaryManager:
                     "ranking_type": ranking_type,
                     "ranking_limit": ranking_limit,
                     "max_videos": max(request.max_videos, ranking_limit),
+                    "max_crawl_items": max(request.max_crawl_items, request.max_videos, ranking_limit),
                 }
             )
 
@@ -6591,6 +7597,32 @@ class VideoSummaryManager:
             if value is not None and value != "":
                 return str(value)
         return ""
+
+    def _first_url_value(self, record: Dict[str, Any], keys: List[str]) -> str:
+        for key in keys:
+            for url in self._iter_url_values(record.get(key)):
+                if url.startswith("//"):
+                    return f"https:{url}"
+                if url.startswith(("http://", "https://", "data:")):
+                    return url
+        return ""
+
+    def _iter_url_values(self, value: Any) -> Iterable[str]:
+        if value in (None, "", [], {}):
+            return []
+        if isinstance(value, str):
+            return [part.strip() for part in re.split(r"[\s,;]+", value) if part.strip()]
+        if isinstance(value, dict):
+            values: List[str] = []
+            for key in ("url", "src", "href", "image", "cover", "origin", "url_list", "urls"):
+                values.extend(self._iter_url_values(value.get(key)))
+            return values
+        if isinstance(value, list):
+            values: List[str] = []
+            for item in value:
+                values.extend(self._iter_url_values(item))
+            return values
+        return [str(value).strip()] if str(value).strip() else []
 
     def _split_urls(self, value: Any) -> List[str]:
         if isinstance(value, list):

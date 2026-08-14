@@ -1,52 +1,98 @@
-# MediaCrawler Video
+# MediaCrawler Video Workbench
 
-基于 [NanmiCoder/MediaCrawler](https://github.com/NanmiCoder/MediaCrawler) 的视频检索、下载与多模态理解工作台。
+<div align="center">
 
-这个 fork 的目标已经不只是“把平台内容爬到本地”，而是围绕视频任务形成一条可操作的流程：
+基于 [NanmiCoder/MediaCrawler](https://github.com/NanmiCoder/MediaCrawler) 改造的视频检索、下载与多模态理解工作台。
 
-1. 真实调用各平台已有爬虫或公开接口检索候选视频。
-2. 先返回候选元数据，人工勾选需要处理的视频。
-3. 对选中视频执行下载、OSS 转存、Qwen/DashScope 视频理解、可选 Whisper 转录。
-4. 生成单视频时间线摘要、整体汇总、Markdown 结果和 Mermaid 思维导图。
-5. 同一套后端能力同时支持 WebUI 和 CLI。
+[English](README_en.md) · [原项目](https://github.com/NanmiCoder/MediaCrawler) · [数据存储说明](docs/data_storage_guide.md) · [CDP 模式说明](docs/CDP模式使用指南.md)
 
-本项目仍继承原 MediaCrawler 的非商业学习研究属性。请只在个人学习、研究、测试场景使用，不要用于商业化、大规模抓取、绕过平台限制或任何违法违规行为。
+![Python](https://img.shields.io/badge/Python-3.11-blue)
+![Node.js](https://img.shields.io/badge/Node.js-16%2B-green)
+![FastAPI](https://img.shields.io/badge/API-FastAPI-009688)
+![Vite](https://img.shields.io/badge/WebUI-Vite-646CFF)
+![License](https://img.shields.io/badge/License-Non--commercial-orange)
 
-## 当前重点能力
+</div>
 
-- 视频搜索工作台：支持按标题/关键词、作者、榜单检索候选。
-- 作者候选：B 站支持用户名候选搜索，重名时先返回 UID、头像、粉丝数、视频数等信息；其他平台优先使用主页链接或 creator ID。
-- 候选勾选：默认先爬元数据，不自动下载全部结果，降低流量和账号风险。
-- 下载与分析流水线：支持下载、进度条、子任务耗时、上传速率、失败原因展示。
-- 多模态理解：支持 Qwen/DashScope 兼容 API，默认模型为 `qwen3.5-omni-plus`，默认不启用 Whisper。
-- 文本融合：可选 Whisper 转录，结果会作为文本上下文融合进视频理解。
-- OSS 转存：支持把本地视频或源站视频流转存到阿里云 OSS，再用签名 URL 交给模型；默认分析后清理临时 OSS 对象。
-- Markdown 渲染：前端支持 Markdown、表格和 Mermaid mindmap。
-- 数据管理：区分搜索记录、榜单记录、创作者记录、内容记录、评论记录、视频理解结果。
-- CLI：`tools/video_summary_cli.py` 覆盖作者解析、任务启动、任务轮询、平台 Cookie 档案和 Qwen/OSS 配置管理。
-- 原爬虫兼容：保留 `main.py` 和原 MediaCrawler 的 search/detail/creator 入口。
+> [!WARNING]
+> 本项目仅限个人学习、科研验证和技术测试。请遵守目标平台规则、法律法规和数据合规要求，不要用于商业采集、批量抓取、绕过平台限制或侵犯他人权益。
 
-## 项目结构
+## 项目简介
 
-```text
-api/
-  routers/video_summary.py        # 视频工作台 API
-  schemas/video_summary.py        # 视频任务、配置、进度 schema
-  services/video_summary_manager.py
-webui/src/components/video/
-  VideoWorkspace.tsx              # 当前 WebUI 视频工作台
-tools/
-  video_summary_cli.py            # 视频工作台 CLI
-  test_qwen_oss_video.py          # OSS + Qwen 视频 URL 测试工具
-media_platform/                  # 原 MediaCrawler 平台爬虫与本 fork 的增量适配
-store/                           # 各平台采集结果写入逻辑
-data/                            # 本地任务数据，默认不提交 Git
-browser_data/                    # 扫码登录持久化浏览器上下文，默认不提交 Git
-```
+MediaCrawler Video Workbench 是在 [NanmiCoder/MediaCrawler](https://github.com/NanmiCoder/MediaCrawler) 基础上扩展的视频任务工作台。原项目的命令行入口、平台爬虫、登录方式和数据存储仍然保留；本仓库新增了一套面向视频检索、候选筛选、下载和内容归纳的 WebUI、API 与 CLI。
 
-## 快速启动
+主要能力：
 
-### 依赖
+- 按关键词、作者或平台榜单检索视频候选。
+- 先返回元数据，再由用户勾选需要下载或分析的视频。
+- 对选中视频执行下载、断点续传、OSS 临时转存、Qwen/DashScope/Ollama 分析和可选 Whisper 转录。
+- 输出单视频时间线摘要、整体汇总、Markdown 报告和 Mermaid mindmap。
+- WebUI 与 CLI 共用同一套后端接口和任务状态。
+
+未稳定接入的能力会以 `unsupported`、`missing` 或 `failed` 状态呈现，避免把话题、问题卡或缺失直链的记录显示成可下载视频。
+
+## 目录
+
+- [项目简介](#项目简介)
+- [与原 MediaCrawler 的关系](#与原-mediacrawler-的关系)
+- [核心能力](#核心能力)
+- [平台接入状态](#平台接入状态)
+- [快速开始](#快速开始)
+- [WebUI 使用流程](#webui-使用流程)
+- [配置说明](#配置说明)
+- [CLI 使用](#cli-使用)
+- [数据与结果](#数据与结果)
+- [视频理解链路](#视频理解链路)
+- [风控与性能建议](#风控与性能建议)
+- [技术报告](#技术报告)
+- [常见问题](#常见问题)
+- [开发验证](#开发验证)
+- [许可与免责声明](#许可与免责声明)
+
+## 与原 MediaCrawler 的关系
+
+本项目保留并复用原仓库的核心能力：
+
+- `main.py`、`media_platform/`、`store/`、`config/base_config.py` 等原入口仍然可用。
+- 平台登录、Cookie、CDP/Playwright 浏览器上下文尽量沿用原项目设计。
+- 视频工作台只在必要处增加 API、WebUI、任务状态、OSS/Qwen、下载进度、结果渲染等能力。
+
+爬虫侧优先复用原 MediaCrawler 的平台实现；只有在原项目能力不足以支撑视频任务时，才补充直连接口、字段归一化、下载进度和任务管理逻辑。
+
+## 核心能力
+
+| 能力 | 当前实现 |
+| --- | --- |
+| 视频检索 | 支持按关键词、作者、平台榜单检索候选；默认 metadata-only，不自动下载全部结果。 |
+| 作者消歧 | B 站支持按用户名返回候选作者卡片，包含 UID、头像、粉丝数、视频数等；其他平台优先使用主页链接或 creator ID。 |
+| 候选勾选 | 搜索后先展示候选视频，再勾选下载或总结，降低流量和账号风险。 |
+| 下载进度 | 记录当前视频、已下载大小、总大小、速度、百分比、阶段耗时和失败原因。 |
+| 断点续跑 | 任务状态写入 `task_state.json`，失败、停止或后端重启后可继续任务。 |
+| 链接过期处理 | B 站下载失败时会重新解析真实 playurl 后再重试；其他平台不做假重签名。 |
+| 多模态理解 | 支持 Qwen/DashScope 兼容 API，也支持 Ollama 本地视觉模型；当前云端默认模型为 `qwen3.5-omni-plus`，默认不启用 Whisper。 |
+| Whisper 融合 | 可选 openai-whisper，基于 PyTorch；转录文本会作为上下文融合进视频理解 prompt。 |
+| OSS 转存 | 支持源流或本地视频 multipart 上传到阿里云 OSS，使用签名 URL 交给模型；默认分析后清理临时对象。 |
+| Markdown 结果 | 前端支持 Markdown、表格和 Mermaid mindmap 渲染。 |
+| 数据管理 | 区分搜索记录、榜单记录、创作者记录、内容记录、评论记录、视频理解结果。 |
+| CLI | `tools/video_summary_cli.py` 覆盖作者解析、任务启动/轮询/停止/续跑、平台 Cookie、Qwen/OSS 配置。 |
+
+## 平台接入状态
+
+| 平台 | 关键词视频搜索 | 作者候选搜索 | 作者视频 | 榜单 | 下载 | 总结 |
+| --- | --- | --- | --- | --- | --- | --- |
+| B 站 | 已接入并实测通过 | 支持用户名候选，返回 UID/头像/粉丝/视频数 | 已接入并实测通过 | `popular`、`ranking`、`ranking_<region>`、`precious`、`weekly`、`hot_search`；`weekly` 通常需要有效 Cookie | 已接入并实测通过，支持 playurl 过期重解析 | 已接入并实测通过 |
+| 小红书 | 已用有效 Cookie 实测可返回 `type=video` 候选 | 可靠方式是主页链接或 creator ID | 依赖有效 Cookie 与原项目能力 | 未接入真实榜单 | 候选可能不含直链，需要走 detail/native 链路 | 有本地视频后可总结 |
+| 抖音 | 已用有效 Cookie/CDP 或标准模式实测可返回视频候选和播放直链 | 可靠方式是主页链接或 `sec_user_id` | 依赖有效 Cookie | `hot_search`、`trending` 返回热搜词/话题，可继续搜视频 | 有真实视频直链时可下载 | 有本地视频后可总结 |
+| 快手 | 已用有效 Cookie 实测，使用原项目签名搜索接口 | 可靠方式是主页链接或 creator ID | 依赖有效 Cookie，已同步签名 REST profile feed | `hot` 返回 brilliant 短视频热榜 `photoId` 候选 | 有真实视频直链时可下载；仅有 `photoId` 会标记不支持 | 有本地视频后可总结 |
+| 微博 | 保留原项目视频搜索路径，依赖有效 Cookie | 可靠方式是主页链接或 UID | 依赖有效 Cookie 和原项目能力 | `hot_search`、`hot_gov` 返回热搜词/话题，可继续搜视频 | 有真实视频直链时可下载 | 有本地视频后可总结 |
+| 知乎 | 已用有效 Cookie 实测 `zvideo` 搜索通过；日期范围会影响结果 | 可靠方式是主页链接或 creator ID | 已接入 zvideo feed，依赖有效 Cookie | `total`、`zvideo` 返回 hot-lists 榜单；常见结果是问题卡 | 未验证稳定直链下载 | 有本地视频后可总结 |
+| 贴吧 | 未接入真实视频搜索/下载 | 不适用于视频任务 | 不适用于视频任务 | `hot_topic` 返回热议话题，仅展示或作为关键词 | 未接入 | 未接入 |
+
+> 榜单项分两类：真实视频候选可以下载或分析；热搜词、话题、问题卡只能作为后续关键词搜索入口。
+
+## 快速开始
+
+### 环境要求
 
 - Python 3.11
 - [uv](https://docs.astral.sh/uv/getting-started/installation)
@@ -55,7 +101,7 @@ browser_data/                    # 扫码登录持久化浏览器上下文，默
 - 可选：ffmpeg，Whisper 音频转录需要
 - 可选：CUDA 版 PyTorch，本地 Whisper GPU 转录需要
 
-### 安装
+### 安装依赖
 
 ```shell
 cd MediaCrawler_video
@@ -65,7 +111,7 @@ cd webui
 npm install
 ```
 
-标准 Playwright 模式需要安装浏览器：
+如果使用标准 Playwright 模式，需要安装浏览器：
 
 ```shell
 uv run playwright install
@@ -90,7 +136,7 @@ npm run dev
 http://localhost:5173/
 ```
 
-构建静态前端后，也可以只通过后端访问：
+也可以先构建静态前端，再只启动后端：
 
 ```shell
 cd webui
@@ -106,18 +152,72 @@ uv run uvicorn api.main:app --host 127.0.0.1 --port 8080
 http://localhost:8080/
 ```
 
-长视频任务运行时不建议使用 `--reload`，因为 reload 会重启进程，内存中的实时任务状态会丢失。
+长视频任务运行时不建议使用 `--reload`。任务会写入 `data/video_tasks/<task_id>/task_state.json`，后端重启或任务失败后可以续跑，但 `--reload` 仍会中断正在执行的下载、转录、上传或模型请求。
 
-## 登录与账号状态
+### 原 MediaCrawler 入口
 
-平台登录信息在 WebUI 右上角“设置 > 平台登录信息”中管理。
+原爬虫入口仍可使用：
+
+```shell
+uv run main.py --platform xhs --lt qrcode --type search
+uv run main.py --platform xhs --lt qrcode --type detail
+uv run main.py --help
+```
+
+基础配置仍在：
+
+```text
+config/base_config.py
+```
+
+## WebUI 使用流程
+
+### 搜索视频
+
+1. 进入“搜索”页。
+2. 选择平台。
+3. 选择搜索方式：标题/关键词、作者。
+4. 点击检索，先返回候选视频。
+5. 查看标题、作者、发布时间、播放量、点赞数、评论数、时长、大小、封面等元数据。
+6. 勾选需要处理的视频，选择下载或下载并分析。
+
+### 作者任务
+
+B 站支持作者用户名搜索。如果有重名作者，前端会先展示候选作者卡片，选中具体 UID 后再加载该作者视频。
+
+其他平台当前更可靠的输入方式是主页链接或平台 creator ID。暂未稳定支持用户名检索的平台会在界面中提示输入方式。
+
+### 榜单任务
+
+进入“排行榜”页后选择平台和榜单类型。榜单本身由平台实时返回，日期范围主要用于过滤榜单项继续检索到的视频发布时间。
+
+### 任务续跑
+
+任务失败、手动停止或后端重启后，前端会在可恢复任务旁显示“继续”。续跑会复用已下载文件、已完成摘要和已保存候选。
+
+### 设置
+
+右上角“设置”分三类：
+
+- 平台登录信息：管理多套 Cookie/扫码登录档案，并支持登录健康检查。
+- 视频分析 API：管理 Qwen/DashScope API、模型名称、Base URL、OSS 配置。
+- 基础参数：抓取间隔、最大视频数、并发、下载/上传模式、抽帧数、Whisper 参数等。
+
+## 配置说明
+
+### 平台登录信息
 
 支持两种方式：
 
-- Cookie 档案：粘贴浏览器 DevTools 里的 Cookie 表格、JSON cookie 导出或 Cookie header。
+- Cookie 档案：粘贴浏览器 DevTools Cookie 表格、JSON cookie 导出或 Cookie header。
 - 扫码登录：调用原 MediaCrawler 平台登录流程，扫码后保存 Cookie 和 `browser_data/<platform>_user_data_dir` 元信息。
 
-Cookie 与扫码保存的结果本质上都用于后续请求认证。只要某个平台有可用 Cookie 档案，视频任务就可以用 `login_type=cookie` 运行；没有 Cookie 时会根据平台能力尝试二维码登录或无头浏览器流程。
+Cookie 与扫码保存的结果本质上都用于后续请求认证。只要某个平台有可用 Cookie 档案，视频任务就可以用 `login_type=cookie` 运行。
+
+设置页支持“检测登录”：
+
+- B 站会调用真实 `https://api.bilibili.com/x/web-interface/nav` 接口确认 `isLogin`。
+- 其他平台目前做低风险关键字段检查，没有稳定实时探测接口时返回 `warning`，不会假装已经完成真实登录验证。
 
 敏感配置默认保存在：
 
@@ -129,81 +229,52 @@ browser_data/
 
 这些路径已被 `.gitignore` 忽略，不应提交到远程仓库。
 
-## WebUI 工作流
+### 视频分析 API
 
-### 搜索视频
+常用配置项：
 
-1. 进入“搜索”页。
-2. 选择平台。
-3. 搜索方式选择“标题/关键词”或“作者”。
-4. 点击检索。
-5. 在候选列表中查看标题、作者、发布时间、播放量、点赞数、评论数、时长、封面等元数据。
-6. 勾选视频后选择下载或下载并分析。
+| 配置 | 含义 |
+| --- | --- |
+| API Provider | 当前支持 DashScope、OpenAI-compatible 和 Ollama 本地。 |
+| API Key | Qwen/DashScope 或兼容接口密钥。 |
+| Base URL | 兼容接口地址，DashScope 兼容模式默认 `https://dashscope.aliyuncs.com/compatible-mode/v1`。 |
+| Model | 模型名称，前端提供常用 Qwen 候选，也允许手动输入。 |
+| Video Input Mode | 自动、视频优先、抽帧、文本优先等模式；当前推荐保持自动。 |
+| Whisper | 可选，用于转录音频并融合到视频理解 prompt。 |
 
-### 作者任务
+Ollama 本地模式使用 `http://127.0.0.1:11434`，不需要 API Key。当前接入的是 Ollama 官方图片输入能力：后端会先用 ffmpeg 对视频抽帧，再把抽帧图片和文本上下文交给本地 VL 模型。它不是把 `.mp4` 作为视频对象直接交给 Ollama。
 
-B 站支持作者用户名搜索；如果有重名作者，前端会先展示候选作者卡片，选中具体 UID 后再加载该作者视频。
+### OSS 配置
 
-其他平台目前更可靠的方式是输入主页链接或平台 creator ID。未真实接入的作者搜索不会伪装成功。
+启用 OSS 后，后端会把源流或本地视频临时上传到 OSS，再把签名 URL 交给模型。建议保持“分析后删除临时对象”开启，避免 bucket 被一次性视频占满。
 
-### 榜单任务
+### 抓取节奏
 
-进入“排行榜”页，选择平台和榜单类型。榜单结果分两类：
+建议使用保守策略：
 
-- 视频候选：可以直接勾选下载或分析。
-- 话题/热搜词/问题卡：只能继续作为关键词搜索视频，不会假装成可下载视频。
-
-### 设置
-
-“设置”页分三类：
-
-- 平台登录信息：管理多套 Cookie/扫码登录档案。
-- 视频分析 API：管理 Qwen/DashScope API、模型名称、Base URL、OSS 配置。
-- 基础参数：抓取间隔、最大视频数、并发、下载/上传模式、抽帧数、Whisper 参数等。
-
-## 视频分析链路
-
-默认上传后端为 `auto`，真实执行顺序如下：
-
-1. 如果平台返回的源视频 URL 可被 Qwen 直接访问，优先尝试源 URL 直给模型。
-2. 如果源 URL 需要平台请求头且 OSS 已启用，后端会边读源站视频流边 multipart 上传 OSS，再把签名 URL 交给模型。
-3. 如果前两步不可用，进入本地下载。
-4. 本地下载成功后，按配置尝试 OSS URL、DashScope SDK 本地视频上传、OpenAI-compatible base64 视频或抽帧。
-5. 如果启用 Whisper，会先用 ffmpeg 提取音频，再用 openai-whisper 基于 PyTorch 转录，转录文本会融合到模型 prompt 中。
-6. 任务结束后，如启用 `oss_cleanup_after_analysis`，会删除本次分析上传到 OSS 的临时对象。
-
-不会为了“看起来成功”而伪造下载、榜单或模型分析结果。未接入或平台未返回可用直链时，会显示明确的 unsupported、missing 或 failed 状态。
-
-## 平台接入状态
-
-| 平台 | 标题/关键词视频搜索 | 作者候选搜索 | 作者视频 | 榜单 | 下载 | 总结 |
-| --- | --- | --- | --- | --- | --- | --- |
-| B 站 | 已接入并实测通过 | 支持用户名候选，返回 UID/头像/粉丝/视频数 | 已接入并实测通过 | `popular`、`ranking`、`ranking_<region>`、`precious`、`weekly`、`hot_search`；`weekly` 通常需要有效 Cookie | 已接入并实测通过 | 已接入并实测通过 |
-| 小红书 | 已用有效 Cookie 实测可返回 `type=video` 候选 | 可靠方式是主页链接或 creator ID | 依赖有效 Cookie 与原项目能力 | 未接入真实榜单 | 候选可能不含直链，需要走 detail/native 链路 | 有本地视频后可总结 |
-| 抖音 | 已用有效 Cookie/CDP 或标准模式实测可返回视频候选和播放直链 | 可靠方式是主页链接或 `sec_user_id` | 依赖有效 Cookie | `hot_search`、`trending` 返回热搜词/话题，可继续搜视频 | 有真实视频直链时可下载 | 有本地视频后可总结 |
-| 快手 | 已用有效 Cookie 实测，使用原项目签名搜索接口 | 可靠方式是主页链接或 creator ID | 依赖有效 Cookie，已同步签名 REST profile feed | `hot` 返回 brilliant 短视频热榜 `photoId` 候选 | 有真实视频直链时可下载；仅有 `photoId` 会标记不支持 | 有本地视频后可总结 |
-| 微博 | 保留原项目视频搜索路径；依赖有效 Cookie | 可靠方式是主页链接或 UID | 依赖有效 Cookie 和原项目能力 | `hot_search`、`hot_gov` 返回热搜词/话题，可继续搜视频 | 有真实视频直链时可下载 | 有本地视频后可总结 |
-| 知乎 | 已用有效 Cookie 实测 `zvideo` 搜索通过；注意日期范围 | 可靠方式是主页链接或 creator ID | 已接入 zvideo feed，依赖有效 Cookie | `total`、`zvideo` 返回 hot-lists 榜单；常见结果是问题卡 | 未验证稳定直链下载 | 有本地视频后可总结 |
-| 贴吧 | 未接入真实视频搜索/下载 | 不适用于视频任务 | 不适用于视频任务 | `hot_topic` 返回热议话题，仅展示或作为关键词 | 未接入 | 未接入 |
+- 最大并发：`1`
+- 最小间隔 / 最大间隔：使用随机区间
+- 每 N 条长暂停：开启
+- 评论抓取：默认关闭
 
 ## CLI 使用
 
 CLI 调用本地后端 API，所以需要先启动后端。
 
-查看帮助：
+### 帮助
 
 ```shell
 uv run python tools/video_summary_cli.py --help
 uv run python tools/video_summary_cli.py tasks start --help
 ```
 
-解析作者候选：
+### 作者解析
 
 ```shell
 uv run python tools/video_summary_cli.py creators resolve --platform bili --query key725
 ```
 
-按作者 UID 只爬元数据：
+### 按作者 UID 只爬元数据
 
 ```shell
 uv run python tools/video_summary_cli.py tasks start ^
@@ -214,6 +285,7 @@ uv run python tools/video_summary_cli.py tasks start ^
   --start-date 2026-08-07 ^
   --end-date 2026-08-07 ^
   --workflow-mode metadata_only ^
+  --max-crawl-items 100 ^
   --max-videos 2 ^
   --credential-profile-id <bili_profile_id> ^
   --login-type cookie ^
@@ -222,7 +294,9 @@ uv run python tools/video_summary_cli.py tasks start ^
   --crawl-max-sleep-seconds 10
 ```
 
-对元数据任务中的选中视频下载并总结：
+`--max-crawl-items` 是平台侧原始抓取上限，`--max-videos` 是日期/视频类型等筛选后的候选数量。搜索/作者元数据任务会边抓取边按筛选条件计数，筛满 `--max-videos` 后会提前停止；如果一直筛不满，才会最多抓到 `--max-crawl-items`。
+
+### 对选中视频下载并总结
 
 ```shell
 uv run python tools/video_summary_cli.py tasks start ^
@@ -237,7 +311,7 @@ uv run python tools/video_summary_cli.py tasks start ^
   --summarize
 ```
 
-搜索和榜单：
+### 搜索与榜单
 
 ```shell
 uv run python tools/video_summary_cli.py tasks ranking-options
@@ -254,26 +328,28 @@ uv run python tools/video_summary_cli.py tasks start --platform zhihu --source-m
 uv run python tools/video_summary_cli.py tasks start --platform tieba --source-mode ranking --ranking-type hot_topic --ranking-limit 5 --workflow-mode metadata_only
 ```
 
-查询、等待、停止：
+### 查询、等待、停止、续跑
 
 ```shell
 uv run python tools/video_summary_cli.py tasks status <task_id>
 uv run python tools/video_summary_cli.py tasks wait <task_id>
 uv run python tools/video_summary_cli.py tasks stop <task_id>
+uv run python tools/video_summary_cli.py tasks resume <task_id>
 ```
 
-平台 Cookie 档案：
+### 平台 Cookie 档案
 
 ```shell
 uv run python tools/video_summary_cli.py credentials list
 uv run python tools/video_summary_cli.py credentials create --platform bili --name "bili-main" --cookies-file .\bili.cookie.txt
 uv run python tools/video_summary_cli.py credentials activate <credential_profile_id>
 uv run python tools/video_summary_cli.py credentials show <credential_profile_id>
+uv run python tools/video_summary_cli.py credentials health <credential_profile_id>
 uv run python tools/video_summary_cli.py credentials update <credential_profile_id> --platform bili --name "bili-main" --cookies-file .\bili.cookie.txt
 uv run python tools/video_summary_cli.py credentials delete <credential_profile_id>
 ```
 
-扫码登录并保存 Cookie：
+### 扫码登录并保存 Cookie
 
 ```shell
 uv run python tools/video_summary_cli.py credentials qrcode-login --platform bili --name "bili-qrcode"
@@ -281,13 +357,15 @@ uv run python tools/video_summary_cli.py credentials qrcode-status <login_task_i
 uv run python tools/video_summary_cli.py credentials qrcode-wait <login_task_id>
 ```
 
-Qwen/DashScope 与 OSS：
+### Qwen/DashScope 与 OSS
 
 ```shell
 uv run python tools/video_summary_cli.py qwen list
 uv run python tools/video_summary_cli.py qwen create --name "dashscope-main" --api-key-file .\qwen.key.txt --model qwen3.5-omni-plus
 uv run python tools/video_summary_cli.py qwen activate <qwen_profile_id>
 uv run python tools/video_summary_cli.py qwen show <qwen_profile_id>
+
+uv run python tools/video_summary_cli.py qwen create --name "ollama-local" --api-provider ollama --base-url http://127.0.0.1:11434 --model qwen2.5vl:3b
 
 uv run python tools/video_summary_cli.py qwen update <qwen_profile_id> ^
   --name "dashscope-main" ^
@@ -303,32 +381,14 @@ uv run python tools/video_summary_cli.py qwen update <qwen_profile_id> ^
   --oss-url-expires-seconds 7200
 ```
 
-测试 OSS + Qwen 大视频 URL：
+### OSS + Qwen 视频 URL 测试
 
 ```shell
 uv run python tools/test_qwen_oss_video.py --video path\to\video.mp4 --model qwen-vl-max --model qwen3.5-omni-plus
 uv run python tools/test_qwen_oss_video.py
 ```
 
-## 原 MediaCrawler 入口
-
-原爬虫入口仍可使用：
-
-```shell
-uv run main.py --platform xhs --lt qrcode --type search
-uv run main.py --platform xhs --lt qrcode --type detail
-uv run main.py --help
-```
-
-基础配置仍在：
-
-```text
-config/base_config.py
-```
-
-视频工作台会在需要时复用原项目的平台 crawler、client、store 和 login 模块，但不会完全绕开原项目重造爬虫。
-
-## 数据保存
+## 数据与结果
 
 原爬虫数据仍支持 JSON、JSONL、CSV、Excel、SQLite、MySQL、MongoDB 等方式，具体见：
 
@@ -336,16 +396,29 @@ config/base_config.py
 docs/data_storage_guide.md
 ```
 
-视频任务数据默认在：
+视频任务默认保存到：
 
 ```text
 data/video_tasks/<task_id>/
   raw/                 # 平台原始元数据、下载文件
   transcripts/         # Whisper 转录
+  task_state.json      # 可恢复任务状态、子任务进度、候选项状态
   result.json          # 任务结果、单视频摘要、整体汇总
 ```
 
 WebUI 的“数据管理”会隐藏敏感配置文件，并按类别展示搜索、榜单、评论、内容、创作者和视频理解结果。
+
+## 视频理解链路
+
+默认上传后端为 `auto`，真实执行顺序如下：
+
+1. 如果 API Provider 是 Ollama，本地模型会跳过视频 URL/视频文件直传，直接走抽帧图片分析。
+2. 如果平台返回的源视频 URL 可被 Qwen 直接访问，优先尝试源 URL 直给模型。
+3. 如果源 URL 需要平台请求头且 OSS 已启用，后端会边读源站视频流边 multipart 上传 OSS，再把签名 URL 交给模型。
+4. 如果前两步不可用，进入本地下载。
+5. 本地下载成功后，按配置尝试 OSS URL、DashScope SDK 本地视频上传、OpenAI-compatible base64 视频或抽帧。
+6. 如果启用 Whisper，会先用 ffmpeg 提取音频，再用 openai-whisper 基于 PyTorch 转录，转录文本会融合到模型 prompt 中。
+7. 任务结束后，如启用 `oss_cleanup_after_analysis`，会删除本次分析上传到 OSS 的临时对象。
 
 ## 风控与性能建议
 
@@ -356,11 +429,19 @@ WebUI 的“数据管理”会隐藏敏感配置文件，并按类别展示搜�
 - 不建议开启评论大规模抓取。
 - OSS 只作为临时转存，建议保持“分析后删除临时对象”开启。
 
+## 技术报告
+
+完整实现说明、平台接入状态、测试统计和性能评估见：
+
+```text
+TECHNICAL_REPORT.md
+```
+
 ## 常见问题
 
-### 为什么整体汇总有时走 fallback？
+### 为什么整体汇总有时使用本地汇总？
 
-当聚合模型调用失败、API key 未配置或模型没有返回可用文本时，后端会用已生成的单视频摘要自动整理一个本地 fallback 汇总。fallback 不再截断 Markdown，会保留共同主题、各自梗概、摘要和 Mermaid 思维导图。
+当聚合模型调用失败、API key 未配置或模型没有返回可用文本时，后端会根据已完成的单视频摘要生成本地汇总，并在日志和结果中保留对应状态。
 
 ### 为什么有些榜单项不能下载？
 
@@ -374,12 +455,16 @@ WebUI 的“数据管理”会隐藏敏感配置文件，并按类别展示搜�
 
 Whisper/openai-whisper 模型本身支持分段时间信息。本项目会用 ffmpeg 抽音频，再用 PyTorch 版 openai-whisper 运行；如果有 CUDA 可用，会使用 GPU 和 fp16。
 
+### B 站下载中断后会怎样？
+
+B 站下载会保留 `.part` 临时文件，并在链接失败时重新解析 playurl。若服务端支持 Range，会尽量续传；不支持时会重新下载。
+
 ## 开发验证
 
 常用检查：
 
 ```shell
-uv run python -m py_compile api\services\video_summary_manager.py api\routers\data.py api\schemas\crawler.py api\schemas\video_summary.py
+uv run python -m py_compile api\services\video_summary_manager.py api\routers\video_summary.py api\schemas\video_summary.py tools\video_summary_cli.py
 
 cd webui
 npm run build

@@ -71,7 +71,7 @@ export interface QwenSettings {
   profile_name: string
   api_key_configured: boolean
   api_key_masked: string | null
-  api_provider: 'dashscope' | 'openai_compatible'
+  api_provider: 'dashscope' | 'openai_compatible' | 'ollama'
   base_url: string
   model: string
   video_input_mode: 'auto' | 'video' | 'frames' | 'text_first'
@@ -96,7 +96,7 @@ export interface QwenSettings {
 
 export interface QwenSettingsPayload {
   api_key?: string
-  api_provider?: 'dashscope' | 'openai_compatible'
+  api_provider?: 'dashscope' | 'openai_compatible' | 'ollama'
   base_url: string
   model: string
   oss_enabled?: boolean
@@ -116,7 +116,7 @@ export interface QwenProfile {
   active: boolean
   api_key_configured: boolean
   api_key_masked: string | null
-  api_provider: 'dashscope' | 'openai_compatible'
+  api_provider: 'dashscope' | 'openai_compatible' | 'ollama'
   base_url: string
   model: string
   video_input_mode: 'auto' | 'video' | 'frames' | 'text_first'
@@ -173,6 +173,43 @@ export interface PlatformCredential {
 
 export interface PlatformCredentialSecret extends PlatformCredential {
   cookies: string
+}
+
+export interface PlatformCredentialHealth {
+  profile_id: string
+  platform: string
+  status: 'ok' | 'warning' | 'error'
+  checked_at: string
+  message: string
+  cookie_count: number
+  present_keys: string[]
+  missing_required_keys: string[]
+  missing_recommended_keys: string[]
+  live_probe_supported: boolean
+  live_probe_ok: boolean | null
+  probe_url: string
+  http_status: number | null
+  authenticated: boolean | null
+  details: Record<string, unknown>
+}
+
+export interface PlatformCredentialSelfTest {
+  profile_id: string
+  platform: string
+  status: 'ok' | 'warning' | 'error'
+  checked_at: string
+  message: string
+  health: PlatformCredentialHealth
+  task_id: string | null
+  task_status: 'pending' | 'running' | 'completed' | 'error' | null
+  source_mode: 'creator' | 'search' | 'ranking'
+  probe_keyword: string
+  total_records: number
+  matched_videos: number
+  item_count: number
+  wall_seconds: number | null
+  error_message: string | null
+  logs_tail: string[]
 }
 
 export interface PlatformCredentialPayload {
@@ -256,6 +293,7 @@ export interface VideoSummaryTaskPayload {
   cookies?: string
   start_date: string
   end_date: string
+  max_crawl_items: number
   max_videos: number
   crawl_concurrency: number
   headless: boolean
@@ -408,6 +446,10 @@ export const videoSummaryApi = {
     api.get<PlatformCredentialsResponse>('/video-summary/platform-credentials'),
   getPlatformCredentialSecret: (profileId: string) =>
     api.get<PlatformCredentialSecret>(`/video-summary/platform-credentials/${profileId}/secret`),
+  checkPlatformCredentialHealth: (profileId: string) =>
+    api.post<PlatformCredentialHealth>(`/video-summary/platform-credentials/${profileId}/health`),
+  selfTestPlatformCredential: (profileId: string) =>
+    api.post<PlatformCredentialSelfTest>(`/video-summary/platform-credentials/${profileId}/self-test`, undefined, { timeout: 150000 }),
   createPlatformCredential: (payload: PlatformCredentialPayload) =>
     api.post<PlatformCredential>('/video-summary/platform-credentials', payload),
   updatePlatformCredential: (profileId: string, payload: PlatformCredentialPayload) =>
@@ -428,6 +470,8 @@ export const videoSummaryApi = {
     api.get<VideoSummaryTaskStatus>(`/video-summary/tasks/${taskId}`),
   stopTask: (taskId: string) =>
     api.post(`/video-summary/tasks/${taskId}/stop`),
+  resumeTask: (taskId: string) =>
+    api.post<VideoSummaryTaskStatus>(`/video-summary/tasks/${taskId}/resume`),
 }
 
 export interface EnvCheckResult {

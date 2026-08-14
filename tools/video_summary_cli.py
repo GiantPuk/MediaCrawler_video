@@ -170,7 +170,8 @@ def start_task(
     cookies_file: Optional[Path] = typer.Option(None, "--cookies-file", help="Text file containing Cookie header."),
     start_date: str = typer.Option(date.today().isoformat(), "--start-date"),
     end_date: str = typer.Option(date.today().isoformat(), "--end-date"),
-    max_videos: int = typer.Option(20, "--max-videos", min=1, max=200),
+    max_crawl_items: int = typer.Option(100, "--max-crawl-items", min=1, max=500, help="Raw platform crawl cap before date/video filtering."),
+    max_videos: int = typer.Option(20, "--max-videos", min=1, max=200, help="Final candidate count after filtering."),
     crawl_concurrency: int = typer.Option(1, "--crawl-concurrency", min=1, max=8, help="MediaCrawler request concurrency. Keep 1 for conservative account risk."),
     headless: bool = typer.Option(False, "--headless/--headed"),
     crawl_sleep_seconds: float = typer.Option(5.0, "--crawl-sleep-seconds", min=0.0, max=120.0),
@@ -227,6 +228,7 @@ def start_task(
         "cookies": _read_text(cookies, cookies_file),
         "start_date": start_date,
         "end_date": end_date,
+        "max_crawl_items": max(max_crawl_items, max_videos),
         "max_videos": max_videos,
         "crawl_concurrency": crawl_concurrency,
         "headless": headless,
@@ -305,6 +307,14 @@ def stop_task(
     _print_json(_request("POST", api_base, f"/video-summary/tasks/{task_id}/stop"))
 
 
+@tasks_app.command("resume")
+def resume_task(
+    task_id: str = typer.Argument(...),
+    api_base: str = typer.Option(DEFAULT_API_BASE, "--api-base"),
+) -> None:
+    _print_json(_request("POST", api_base, f"/video-summary/tasks/{task_id}/resume"))
+
+
 @credentials_app.command("list")
 def list_credentials(api_base: str = typer.Option(DEFAULT_API_BASE, "--api-base")) -> None:
     _print_json(_request("GET", api_base, "/video-summary/platform-credentials"))
@@ -316,6 +326,14 @@ def show_credential(
     api_base: str = typer.Option(DEFAULT_API_BASE, "--api-base"),
 ) -> None:
     _print_json(_request("GET", api_base, f"/video-summary/platform-credentials/{profile_id}/secret"))
+
+
+@credentials_app.command("health")
+def credential_health(
+    profile_id: str = typer.Argument(...),
+    api_base: str = typer.Option(DEFAULT_API_BASE, "--api-base"),
+) -> None:
+    _print_json(_request("POST", api_base, f"/video-summary/platform-credentials/{profile_id}/health"))
 
 
 @credentials_app.command("create")
@@ -449,7 +467,7 @@ def create_qwen(
     name: str = typer.Option("Default Qwen", "--name", "-n"),
     api_key: str = typer.Option("", "--api-key"),
     api_key_file: Optional[Path] = typer.Option(None, "--api-key-file"),
-    api_provider: str = typer.Option("dashscope", "--api-provider", help="dashscope or openai_compatible."),
+    api_provider: str = typer.Option("dashscope", "--api-provider", help="dashscope, openai_compatible, or ollama."),
     base_url: str = typer.Option("https://dashscope.aliyuncs.com/compatible-mode/v1", "--base-url"),
     model: str = typer.Option("qwen3.5-omni-plus", "--model"),
     oss_enabled: bool = typer.Option(False, "--oss-enabled/--no-oss-enabled", help="Upload local videos to OSS and pass signed URLs to Qwen."),
@@ -489,7 +507,7 @@ def update_qwen(
     api_key: str = typer.Option("", "--api-key"),
     api_key_file: Optional[Path] = typer.Option(None, "--api-key-file"),
     clear_api_key: bool = typer.Option(False, "--clear-api-key"),
-    api_provider: str = typer.Option("dashscope", "--api-provider", help="dashscope or openai_compatible."),
+    api_provider: str = typer.Option("dashscope", "--api-provider", help="dashscope, openai_compatible, or ollama."),
     base_url: str = typer.Option("https://dashscope.aliyuncs.com/compatible-mode/v1", "--base-url"),
     model: str = typer.Option("qwen3.5-omni-plus", "--model"),
     oss_enabled: bool = typer.Option(False, "--oss-enabled/--no-oss-enabled", help="Upload local videos to OSS and pass signed URLs to Qwen."),

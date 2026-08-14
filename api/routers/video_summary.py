@@ -8,6 +8,8 @@ from ..schemas.video_summary import (
     CreatorResolveResponse,
     PlatformCredentialRequest,
     PlatformCredentialResponse,
+    PlatformCredentialHealthResponse,
+    PlatformCredentialSelfTestResponse,
     PlatformCredentialSecretResponse,
     PlatformCredentialsResponse,
     PlatformQrcodeLoginRequest,
@@ -123,6 +125,22 @@ async def activate_platform_credential(profile_id: str):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.post("/platform-credentials/{profile_id}/health", response_model=PlatformCredentialHealthResponse)
+async def check_platform_credential_health(profile_id: str):
+    try:
+        return await video_summary_manager.check_platform_credential_health(profile_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/platform-credentials/{profile_id}/self-test", response_model=PlatformCredentialSelfTestResponse)
+async def self_test_platform_credential(profile_id: str):
+    try:
+        return await video_summary_manager.self_test_platform_credential(profile_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/platform-credentials/qrcode-login/start", response_model=PlatformQrcodeLoginStatus)
 async def start_platform_qrcode_login(request: PlatformQrcodeLoginRequest):
     try:
@@ -165,3 +183,12 @@ async def stop_video_summary_task(task_id: str):
     if not await video_summary_manager.stop_task(task_id):
         raise HTTPException(status_code=400, detail="Video summary task is not running")
     return {"status": "ok", "message": "Video summary task stopped"}
+
+
+@router.post("/tasks/{task_id}/resume", response_model=VideoSummaryTaskStatus)
+async def resume_video_summary_task(task_id: str):
+    try:
+        status = await video_summary_manager.resume_task(task_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return status

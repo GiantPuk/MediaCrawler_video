@@ -407,6 +407,7 @@ export function VideoSummaryPanel() {
 
   const [startDate, setStartDate] = useState(todayString())
   const [endDate, setEndDate] = useState(todayString())
+  const [maxCrawlItems, setMaxCrawlItems] = useState(100)
   const [maxVideos, setMaxVideos] = useState(20)
   const [crawlSleepSeconds, setCrawlSleepSeconds] = useState(5)
   const [loginType, setLoginType] = useState('qrcode')
@@ -792,6 +793,7 @@ export function VideoSummaryPanel() {
         cookies: taskCookies,
         start_date: startDate,
         end_date: endDate,
+        max_crawl_items: Math.max(maxCrawlItems, maxVideos, cleanRankingLimit),
         max_videos: effectiveSourceMode === 'ranking' ? Math.max(maxVideos, cleanRankingLimit) : maxVideos,
         crawl_concurrency: 1,
         headless,
@@ -1048,13 +1050,24 @@ export function VideoSummaryPanel() {
                     </SelectContent>
                   </Select>
                 </Field>
-                <Field label="最大视频数">
+                <Field label="筛选后数量" hint="日期/视频类型筛选后最多保留多少个候选。">
                   <Input
                     type="number"
                     min={1}
                     max={200}
                     value={maxVideos}
                     onChange={(event) => setMaxVideos(parseInt(event.target.value, 10) || 1)}
+                    disabled={isTaskRunning}
+                    className="h-9 text-xs"
+                  />
+                </Field>
+                <Field label="最大抓取上限" hint="平台侧先最多抓多少条原始记录，再筛选。">
+                  <Input
+                    type="number"
+                    min={1}
+                    max={500}
+                    value={maxCrawlItems}
+                    onChange={(event) => setMaxCrawlItems(parseInt(event.target.value, 10) || 1)}
                     disabled={isTaskRunning}
                     className="h-9 text-xs"
                   />

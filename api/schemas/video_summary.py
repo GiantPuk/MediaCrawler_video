@@ -10,7 +10,7 @@ from .crawler import LoginTypeEnum, PlatformEnum
 
 VideoInputMode = Literal["auto", "video", "frames", "text_first"]
 VideoUploadBackend = Literal["auto", "oss", "dashscope", "openai"]
-VideoAnalysisApiProvider = Literal["dashscope", "openai_compatible"]
+VideoAnalysisApiProvider = Literal["dashscope", "openai_compatible", "ollama"]
 VideoTaskWorkflowMode = Literal["full", "metadata_only", "selected_items"]
 VideoTaskSourceMode = Literal["creator", "search", "ranking"]
 DownloadStatus = Literal["downloaded", "existing", "missing", "unsupported", "failed", "skipped"]
@@ -172,6 +172,43 @@ class PlatformQrcodeLoginStatus(BaseModel):
     browser_data_dir: str = ""
 
 
+class PlatformCredentialHealthResponse(BaseModel):
+    profile_id: str
+    platform: PlatformEnum
+    status: Literal["ok", "warning", "error"]
+    checked_at: str
+    message: str
+    cookie_count: int = 0
+    present_keys: List[str] = Field(default_factory=list)
+    missing_required_keys: List[str] = Field(default_factory=list)
+    missing_recommended_keys: List[str] = Field(default_factory=list)
+    live_probe_supported: bool = False
+    live_probe_ok: Optional[bool] = None
+    probe_url: str = ""
+    http_status: Optional[int] = None
+    authenticated: Optional[bool] = None
+    details: Dict[str, Any] = Field(default_factory=dict)
+
+
+class PlatformCredentialSelfTestResponse(BaseModel):
+    profile_id: str
+    platform: PlatformEnum
+    status: Literal["ok", "warning", "error"]
+    checked_at: str
+    message: str
+    health: PlatformCredentialHealthResponse
+    task_id: Optional[str] = None
+    task_status: Optional[Literal["pending", "running", "completed", "error"]] = None
+    source_mode: VideoTaskSourceMode = "search"
+    probe_keyword: str = ""
+    total_records: int = 0
+    matched_videos: int = 0
+    item_count: int = 0
+    wall_seconds: Optional[float] = None
+    error_message: Optional[str] = None
+    logs_tail: List[str] = Field(default_factory=list)
+
+
 class CreatorCandidate(BaseModel):
     id: str
     platform: PlatformEnum
@@ -215,6 +252,7 @@ class VideoSummaryTaskRequest(BaseModel):
     cookies: str = ""
     start_date: date = Field(default_factory=date.today)
     end_date: date = Field(default_factory=date.today)
+    max_crawl_items: int = Field(default=100, ge=1, le=500)
     max_videos: int = Field(default=20, ge=1, le=200)
     crawl_concurrency: int = Field(default=1, ge=1, le=8)
     headless: bool = False

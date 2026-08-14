@@ -77,12 +77,28 @@ def get_video_url_arr(note_item: Dict) -> List:
         media = video_dict.get('media', {})
         stream = media.get('stream', {})
         videos = stream.get('h264')
+        if type(videos).__name__ != 'list':
+            videos = []
+            if isinstance(stream, dict):
+                for stream_items in stream.values():
+                    if isinstance(stream_items, list):
+                        videos.extend(stream_items)
         if type(videos).__name__ == 'list':
-            videoArr = [v.get('master_url') for v in videos]
+            for video_item in videos:
+                if not isinstance(video_item, dict):
+                    continue
+                master_url = video_item.get('master_url')
+                if master_url:
+                    videoArr.append(master_url)
+                    break
+                backup_urls = video_item.get('backup_urls') or video_item.get('backup_url') or []
+                if isinstance(backup_urls, list) and backup_urls:
+                    videoArr.append(backup_urls[0])
+                    break
     else:
         videoArr = [f"http://sns-video-bd.xhscdn.com/{originVideoKey}"]
 
-    return videoArr
+    return list(dict.fromkeys(videoArr))
 
 
 def _first_nested_value(data, paths):

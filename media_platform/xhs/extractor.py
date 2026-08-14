@@ -41,11 +41,15 @@ class XiaoHongShuExtractor:
             # Either a CAPTCHA appeared or the note doesn't exist
             return None
 
-        state = re.findall(r"window.__INITIAL_STATE__=({.*})</script>", html)[
-            0
-        ].replace("undefined", '""')
+        match = re.search(r"window\.__INITIAL_STATE__=(.*?)</script>", html, re.S)
+        if match is None:
+            return None
+        state = match.group(1)
+        state = state.replace(":undefined", ":null")
+        state = re.sub(r"new Map\(\[\]\)", "{}", state)
+        state = re.sub(r"new Set\(\[\]\)", "[]", state)
         if state != "{}":
-            note_dict = humps.decamelize(json.loads(state))
+            note_dict = humps.decamelize(json.loads(state, strict=False))
             return note_dict["note"]["note_detail_map"][note_id]["note"]
         return None
 

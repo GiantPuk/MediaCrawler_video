@@ -10,6 +10,7 @@ import {
   KeyRound,
   Loader2,
   Play,
+  Plus,
   QrCode,
   Search,
   Settings,
@@ -32,6 +33,7 @@ import {
   videoSummaryApi,
   type CreatorCandidate,
   type PlatformCredential,
+  type PlatformCredentialSelfTest,
   type PlatformQrcodeLoginStatus,
   type QwenProfile,
   type QwenSettings,
@@ -113,19 +115,29 @@ const RANKING_SUPPORT_NOTES: Record<string, string> = {
 
 const WHISPER_MODELS = ['tiny', 'base', 'small', 'medium', 'turbo', 'large-v3']
 type QwenApiProvider = QwenSettings['api_provider']
+type QwenProviderScope = 'cloud' | 'remote' | 'local'
 
-const QWEN_API_PROVIDER_OPTIONS: Array<{ value: QwenApiProvider; label: string; baseUrl: string; model: string }> = [
+const QWEN_API_PROVIDER_OPTIONS: Array<{ value: QwenApiProvider; label: string; scope: QwenProviderScope; baseUrl: string; model: string }> = [
   {
     value: 'dashscope',
-    label: 'DashScope / Qwen 官方',
+    label: 'DashScope 官方云端',
+    scope: 'cloud',
     baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
     model: 'qwen3.5-omni-plus',
   },
   {
     value: 'openai_compatible',
-    label: 'OpenAI Compatible / 自定义',
+    label: 'OpenAI Compatible 远程 API',
+    scope: 'remote',
     baseUrl: 'https://api.openai.com/v1',
     model: 'qwen3.5-omni-plus',
+  },
+  {
+    value: 'ollama',
+    label: '本地 Ollama',
+    scope: 'local',
+    baseUrl: 'http://127.0.0.1:11434',
+    model: 'qwen2.5vl:3b',
   },
 ]
 
@@ -184,6 +196,69 @@ const QWEN_MODEL_OPTIONS_BY_PROVIDER: Record<QwenApiProvider, string[]> = {
     'qwen2.5-vl-32b-instruct',
     'qwen2.5-vl-7b-instruct',
   ],
+  ollama: [
+    'qwen2.5vl:3b',
+    'qwen3-vl:8b',
+    'qwen2.5vl:7b',
+    'llama3.2-vision:11b',
+    'llava:7b',
+  ],
+}
+
+const QWEN_PROVIDER_SHORT_LABELS: Record<QwenApiProvider, string> = {
+  dashscope: 'DashScope',
+  openai_compatible: '远程 API',
+  ollama: '本地 Ollama',
+}
+
+type QwenModelOption = {
+  value: string
+  sources: QwenApiProvider[]
+}
+
+const ALL_QWEN_MODEL_OPTIONS: QwenModelOption[] = Object.entries(QWEN_MODEL_OPTIONS_BY_PROVIDER)
+  .flatMap(([provider, models]) => models.map((model) => ({ provider: provider as QwenApiProvider, model })))
+  .reduce<QwenModelOption[]>((options, item) => {
+    const existing = options.find((option) => option.value === item.model)
+    if (existing) {
+      if (!existing.sources.includes(item.provider)) existing.sources.push(item.provider)
+      return options
+    }
+    options.push({ value: item.model, sources: [item.provider] })
+    return options
+  }, [])
+
+const ALL_QWEN_MODEL_VALUES = new Set(ALL_QWEN_MODEL_OPTIONS.map((option) => option.value))
+
+function providerScopeLabel(scope: QwenProviderScope): string {
+  if (scope === 'local') return '本地'
+  if (scope === 'cloud') return '云端'
+  return '远程'
+}
+
+function scopeBadgeClass(isLocal: boolean): string {
+  return isLocal
+    ? 'rounded border border-emerald-400/40 bg-emerald-400/10 px-1.5 py-0.5 text-[10px] font-medium text-emerald-300'
+    : 'rounded border border-cyber-border-subtle bg-cyber-bg-tertiary px-1.5 py-0.5 text-[10px] text-cyber-text-muted'
+}
+
+function modelScopeLabel(option: QwenModelOption): string {
+  return option.sources.map((source) => QWEN_PROVIDER_SHORT_LABELS[source]).join(' / ')
+}
+
+function modelHasLocalSource(option: QwenModelOption): boolean {
+  return option.sources.includes('ollama')
+}
+
+function qwenModelOption(value: string): QwenModelOption | undefined {
+  return ALL_QWEN_MODEL_OPTIONS.find((option) => option.value === value)
+}
+
+function preferredProviderForModel(option: QwenModelOption, currentProvider: QwenApiProvider): QwenApiProvider {
+  if (option.sources.includes(currentProvider)) return currentProvider
+  if (option.sources.includes('ollama')) return 'ollama'
+  if (option.sources.includes('dashscope')) return 'dashscope'
+  return option.sources[0] ?? currentProvider
 }
 
 const VIEW_METRIC_KEYS = [
@@ -257,7 +332,8 @@ const VIDEO_SIZE_KEYS = [
 const VIDEO_SIZE_MB_KEYS = ['video_size_mb', 'size_mb', 'file_size_mb']
 
 const DEFAULT_TASK_SETTINGS = {
-  settingsVersion: 2,
+  settingsVersion: 3,
+  maxCrawlItems: 100,
   maxVideos: 20,
   crawlConcurrency: 1,
   crawlMinSleepSeconds: 5,
@@ -297,7 +373,7 @@ const VIDEO_WORKSPACE_COPY = {
     modelName: '模型名称',
     commonModel: '常用模型',
     customModelInput: '手动输入',
-    modelHint: '可从常用候选中选择，也可以直接输入服务商实际支持的模型名。',
+    modelHint: '模型下拉展示所有常用候选，并标注来源；实际调用链路由上方接口类型与 Base URL 决定，也可以直接输入服务商实际支持的模型名。',
     ossUpload: 'OSS 转存上传',
     ossDesc: '启用后，长视频会先上传到 OSS 并用签名 URL 传给模型；未配置完整时自动回到原上传链路。',
     ossCleanup: '分析结束后删除 OSS 临时视频',
@@ -365,7 +441,7 @@ const VIDEO_WORKSPACE_COPY = {
     modelName: 'Model name',
     commonModel: 'Common models',
     customModelInput: 'Custom input',
-    modelHint: 'Choose a common model or type any model name your provider supports.',
+    modelHint: 'The model menu shows all common candidates with source tags. The actual request path is controlled by API Provider and Base URL, and you can still type any supported model name.',
     ossUpload: 'OSS Transfer Upload',
     ossDesc: 'When enabled, long videos are uploaded to OSS first and passed to the model as signed URLs. Incomplete config falls back to the existing upload path.',
     ossCleanup: 'Delete OSS temporary videos after analysis',
@@ -452,9 +528,15 @@ function loadTaskSettings(): TaskSettings {
     if (!raw) return DEFAULT_TASK_SETTINGS
     const parsed = JSON.parse(raw)
     const migrated = { ...DEFAULT_TASK_SETTINGS, ...parsed }
-    if ((parsed.settingsVersion ?? 1) < DEFAULT_TASK_SETTINGS.settingsVersion) {
-      migrated.settingsVersion = DEFAULT_TASK_SETTINGS.settingsVersion
+    const parsedVersion = parsed.settingsVersion ?? 1
+    if (parsedVersion < 2) {
       migrated.enableWhisperTranscription = DEFAULT_TASK_SETTINGS.enableWhisperTranscription
+    }
+    if (parsedVersion < 3 && typeof parsed.maxCrawlItems !== 'number') {
+      migrated.maxCrawlItems = Math.max(DEFAULT_TASK_SETTINGS.maxCrawlItems, Number(parsed.maxVideos) || DEFAULT_TASK_SETTINGS.maxVideos)
+    }
+    if (parsedVersion < DEFAULT_TASK_SETTINGS.settingsVersion) {
+      migrated.settingsVersion = DEFAULT_TASK_SETTINGS.settingsVersion
     }
     if (
       typeof parsed.crawlSleepSeconds === 'number' &&
@@ -730,15 +812,19 @@ function TaskStepTimeline({ steps, copy }: { steps: VideoTaskStep[]; copy: Video
                   <div className="h-1.5 overflow-hidden rounded-full bg-cyber-bg-tertiary">
                     <div className="h-full bg-cyber-neon-cyan transition-all" style={{ width: `${Math.min(100, Math.max(0, percent))}%` }} />
                   </div>
-                  <div className="grid grid-cols-2 gap-2 text-[10px] text-cyber-text-muted md:grid-cols-4">
+                  <div className="grid grid-cols-2 gap-2 text-[10px] text-cyber-text-muted md:grid-cols-3">
                     <span>{hasTotal ? `${formatByteSize(step.transferred_bytes)} / ${formatByteSize(step.total_bytes)}` : formatByteSize(step.transferred_bytes || null)}</span>
                     <span>{step.progress_percent !== null ? `${step.progress_percent.toFixed(1)}%` : '-'}</span>
                     <span>{formatSpeed(step.speed_bps)}</span>
-                    <span className="truncate" title={step.message || undefined}>{step.message || '-'}</span>
                   </div>
+                  {step.message ? (
+                    <div className="break-words rounded bg-cyber-bg-tertiary/60 px-2 py-1 text-[10px] leading-4 text-cyber-text-secondary">
+                      {step.message}
+                    </div>
+                  ) : null}
                 </div>
               ) : step.message ? (
-                <div className="mt-1 text-[10px] text-cyber-text-muted">{step.message}</div>
+                <div className="mt-1 break-words rounded bg-cyber-bg-tertiary/60 px-2 py-1 text-[10px] leading-4 text-cyber-text-secondary">{step.message}</div>
               ) : null}
             </div>
           )
@@ -962,6 +1048,8 @@ export function VideoWorkspace() {
   const [credentialName, setCredentialName] = useState('默认登录信息')
   const [credentialCookies, setCredentialCookies] = useState('')
   const [clearCredentialCookies, setClearCredentialCookies] = useState(false)
+  const [credentialSelfTest, setCredentialSelfTest] = useState<PlatformCredentialSelfTest | null>(null)
+  const [selfTestingCredential, setSelfTestingCredential] = useState(false)
   const [qrcodeLoginTaskId, setQrcodeLoginTaskId] = useState('')
   const [qrcodeLoginStatus, setQrcodeLoginStatus] = useState<PlatformQrcodeLoginStatus | null>(null)
   const [startingQrcodeLogin, setStartingQrcodeLogin] = useState(false)
@@ -973,6 +1061,7 @@ export function VideoWorkspace() {
   const [startingDiscovery, setStartingDiscovery] = useState(false)
   const [startingAction, setStartingAction] = useState(false)
   const [stopping, setStopping] = useState(false)
+  const [resuming, setResuming] = useState(false)
 
   const platformCredentials = useMemo(
     () => credentials.filter((credential) => credential.platform === platform),
@@ -990,10 +1079,45 @@ export function VideoWorkspace() {
     () => qwenProfiles.find((profile) => profile.id === selectedQwenProfileId) ?? null,
     [qwenProfiles, selectedQwenProfileId],
   )
-  const qwenModelOptions = useMemo(
-    () => QWEN_MODEL_OPTIONS_BY_PROVIDER[qwenApiProvider] ?? QWEN_MODEL_OPTIONS_BY_PROVIDER.dashscope,
-    [qwenApiProvider],
-  )
+  const qwenProfileDirty = useMemo(() => {
+    if (!selectedQwenProfile) return false
+    return (
+      selectedQwenProfile.name !== qwenName ||
+      selectedQwenProfile.api_provider !== qwenApiProvider ||
+      selectedQwenProfile.base_url !== qwenBaseUrl ||
+      selectedQwenProfile.model !== qwenModel ||
+      selectedQwenProfile.oss_enabled !== qwenOssEnabled ||
+      (selectedQwenProfile.oss_bucket ?? '') !== qwenOssBucket ||
+      (selectedQwenProfile.oss_endpoint ?? '') !== qwenOssEndpoint ||
+      (selectedQwenProfile.oss_region ?? '') !== qwenOssRegion ||
+      (selectedQwenProfile.oss_prefix ?? '') !== qwenOssPrefix ||
+      selectedQwenProfile.oss_url_expires_seconds !== qwenOssUrlExpiresSeconds ||
+      selectedQwenProfile.oss_cleanup_after_analysis !== qwenOssCleanupAfterAnalysis ||
+      Boolean(qwenApiKey.trim()) ||
+      Boolean(qwenOssAccessKeyId.trim()) ||
+      Boolean(qwenOssAccessKeySecret.trim()) ||
+      clearQwenKey ||
+      clearQwenOssKey
+    )
+  }, [
+    clearQwenKey,
+    clearQwenOssKey,
+    qwenApiKey,
+    qwenApiProvider,
+    qwenBaseUrl,
+    qwenModel,
+    qwenName,
+    qwenOssAccessKeyId,
+    qwenOssAccessKeySecret,
+    qwenOssBucket,
+    qwenOssCleanupAfterAnalysis,
+    qwenOssEnabled,
+    qwenOssEndpoint,
+    qwenOssPrefix,
+    qwenOssRegion,
+    qwenOssUrlExpiresSeconds,
+    selectedQwenProfile,
+  ])
   const candidateItems = discoveryStatus?.result?.items ?? []
   const selectableCandidateItems = useMemo(
     () => candidateItems.filter((item) => !isRankingTopicItem(item)),
@@ -1179,13 +1303,28 @@ export function VideoWorkspace() {
     setShowQwenOssKey(false)
   }
 
-  function updateQwenApiProvider(value: QwenApiProvider) {
+  function updateQwenApiProvider(value: QwenApiProvider, options: { forceBaseUrl?: boolean; preserveModel?: boolean } = {}) {
     const nextOption = QWEN_API_PROVIDER_OPTIONS.find((option) => option.value === value)
     setQwenApiProvider(value)
     if (!nextOption) return
     const knownBaseUrls = new Set(QWEN_API_PROVIDER_OPTIONS.map((option) => option.baseUrl))
-    setQwenBaseUrl((current) => (knownBaseUrls.has(current.trim().replace(/\/$/, '')) ? nextOption.baseUrl : current))
-    if (!qwenModel.trim()) setQwenModel(nextOption.model)
+    setQwenBaseUrl((current) => (options.forceBaseUrl || knownBaseUrls.has(current.trim().replace(/\/$/, '')) ? nextOption.baseUrl : current))
+    if (!options.preserveModel && !qwenModel.trim()) setQwenModel(nextOption.model)
+  }
+
+  function syncProviderForSelectedModel(modelName: string) {
+    const option = qwenModelOption(modelName)
+    if (!option) return
+    const nextProvider = preferredProviderForModel(option, qwenApiProvider)
+    if (nextProvider !== qwenApiProvider) {
+      updateQwenApiProvider(nextProvider, { forceBaseUrl: true, preserveModel: true })
+      toast.info(`已根据模型来源切换接口类型：${QWEN_API_PROVIDER_OPTIONS.find((item) => item.value === nextProvider)?.label ?? nextProvider}`)
+    }
+  }
+
+  function selectKnownQwenModel(modelName: string) {
+    setQwenModel(modelName)
+    syncProviderForSelectedModel(modelName)
   }
 
   async function copyToClipboard(value: string, label: string) {
@@ -1291,6 +1430,8 @@ export function VideoWorkspace() {
     const longPauseMaxRaw = clampNumber(taskSettings.crawlLongPauseMaxSeconds, 0, 3600, 90)
     const longPauseMinSeconds = Math.min(longPauseMinRaw, longPauseMaxRaw)
     const longPauseMaxSeconds = Math.max(longPauseMinRaw, longPauseMaxRaw)
+    const filteredLimit = Math.round(clampNumber(taskSettings.maxVideos, 1, 200, 20))
+    const crawlLimit = Math.round(clampNumber(taskSettings.maxCrawlItems, 1, 500, 100))
     return {
       platform,
       creator_id: '',
@@ -1300,7 +1441,8 @@ export function VideoWorkspace() {
       cookies: '',
       start_date: startDate,
       end_date: endDate,
-      max_videos: Math.round(clampNumber(taskSettings.maxVideos, 1, 200, 20)),
+      max_crawl_items: Math.max(crawlLimit, filteredLimit),
+      max_videos: filteredLimit,
       crawl_concurrency: Math.round(clampNumber(taskSettings.crawlConcurrency, 1, 8, 1)),
       headless: taskSettings.headless,
       crawl_sleep_seconds: crawlMaxSeconds,
@@ -1419,6 +1561,7 @@ export function VideoWorkspace() {
         search_keyword: sourceMode === 'search' ? query.trim() : '',
         ranking_type: sourceMode === 'ranking' ? rankingType : '',
         ranking_limit: cleanRankingLimit,
+        max_crawl_items: Math.max(cleanRankingLimit, taskSettings.maxCrawlItems, taskSettings.maxVideos),
         max_videos: sourceMode === 'ranking' ? Math.max(cleanRankingLimit, taskSettings.maxVideos) : taskSettings.maxVideos,
         workflow_mode: 'metadata_only',
         summarize: false,
@@ -1518,6 +1661,25 @@ export function VideoWorkspace() {
     }
   }
 
+  async function resumeActiveTask() {
+    const taskId = actionTaskId || discoveryTaskId
+    if (!taskId) return
+    setResuming(true)
+    try {
+      const { data } = await videoSummaryApi.resumeTask(taskId)
+      if (taskId === actionTaskId) {
+        setActionStatus(data)
+      } else {
+        setDiscoveryStatus(data)
+      }
+      toast.success('任务已继续')
+    } catch (error) {
+      toast.error(`继续任务失败: ${extractErrorMessage(error)}`)
+    } finally {
+      setResuming(false)
+    }
+  }
+
   function toggleItem(itemId: string, checked: boolean) {
     setSelectedIds((current) => {
       if (checked) return current.includes(itemId) ? current : [...current, itemId]
@@ -1575,6 +1737,7 @@ export function VideoWorkspace() {
       }
       setCredentialCookies('')
       setClearCredentialCookies(false)
+      setCredentialSelfTest(null)
       await refreshSettings({ credentialProfileId: nextCredentialId })
       toast.success('平台登录信息已保存')
     } catch (error) {
@@ -1588,6 +1751,7 @@ export function VideoWorkspace() {
       await videoSummaryApi.deletePlatformCredential(credentialFormId)
       setCredentialFormId('')
       setCredentialCookies('')
+      setCredentialSelfTest(null)
       await refreshSettings()
       toast.success('平台登录信息已删除')
     } catch (error) {
@@ -1611,6 +1775,38 @@ export function VideoWorkspace() {
     setCredentialName(profile.name)
     setCredentialCookies('')
     setClearCredentialCookies(false)
+    setCredentialSelfTest(null)
+  }
+
+  function startNewCredentialProfile() {
+    setCredentialFormId('')
+    setCredentialName('新登录信息')
+    setCredentialCookies('')
+    setClearCredentialCookies(false)
+    setCredentialSelfTest(null)
+    setQrcodeLoginTaskId('')
+    setQrcodeLoginStatus(null)
+  }
+
+  async function selfTestCredential() {
+    if (!credentialFormId) return
+    setSelfTestingCredential(true)
+    setCredentialSelfTest(null)
+    try {
+      const { data } = await videoSummaryApi.selfTestPlatformCredential(credentialFormId)
+      setCredentialSelfTest(data)
+      if (data.status === 'ok') {
+        toast.success(`平台配置自测通过：${data.total_records} 条原始记录，${data.item_count} 个候选`)
+      } else if (data.status === 'warning') {
+        toast.warning(data.message)
+      } else {
+        toast.error(data.message)
+      }
+    } catch (error) {
+      toast.error(`平台配置自测失败: ${extractErrorMessage(error)}`)
+    } finally {
+      setSelfTestingCredential(false)
+    }
   }
 
   async function saveQwenProfile() {
@@ -1697,6 +1893,7 @@ export function VideoWorkspace() {
   }
 
   const running = discoveryStatus?.status === 'running' || discoveryStatus?.status === 'pending' || actionStatus?.status === 'running' || actionStatus?.status === 'pending'
+  const canResume = !running && ((actionTaskId && actionStatus?.status === 'error') || (discoveryTaskId && discoveryStatus?.status === 'error'))
 
   return (
     <section className="glass-panel float-panel overflow-hidden animate-slide-up">
@@ -1797,7 +1994,7 @@ export function VideoWorkspace() {
               </Button>
             </div>
 
-            <div className="mt-3 grid grid-cols-1 md:grid-cols-[150px_150px_160px_1fr_auto] gap-3 items-end">
+            <div className="mt-3 grid grid-cols-1 md:grid-cols-[132px_132px_132px_132px_150px_1fr_auto] gap-3 items-end">
               <div>
                 <Label className="text-[11px] text-cyber-text-muted">开始日期</Label>
                 <Input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} disabled={running} className="h-9 text-xs" />
@@ -1806,6 +2003,20 @@ export function VideoWorkspace() {
                 <Label className="text-[11px] text-cyber-text-muted">结束日期</Label>
                 <Input type="date" value={endDate} onChange={(event) => setEndDate(event.target.value)} disabled={running} className="h-9 text-xs" />
               </div>
+              <SettingNumber
+                label="筛选后数量"
+                value={taskSettings.maxVideos}
+                min={1}
+                max={200}
+                onChange={(value) => updateDefaults({ maxVideos: value })}
+              />
+              <SettingNumber
+                label="最大抓取上限"
+                value={taskSettings.maxCrawlItems}
+                min={1}
+                max={500}
+                onChange={(value) => updateDefaults({ maxCrawlItems: value })}
+              />
               <div>
                 <Label className="text-[11px] text-cyber-text-muted">排序</Label>
                 <Select value={sortKey} onValueChange={(value) => setSortKey(value as SortKey)}>
@@ -1828,6 +2039,12 @@ export function VideoWorkspace() {
                 <Button type="button" variant="destructive" onClick={stopActiveTask} disabled={stopping} className="h-9">
                   {stopping ? <Loader2 className="h-4 w-4 animate-spin" /> : <Square className="h-4 w-4" />}
                   停止
+                </Button>
+              ) : null}
+              {canResume ? (
+                <Button type="button" variant="outline" onClick={resumeActiveTask} disabled={resuming} className="h-9">
+                  {resuming ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                  继续
                 </Button>
               ) : null}
             </div>
@@ -2115,8 +2332,16 @@ export function VideoWorkspace() {
           <main className="p-6">
             {settingsSection === 'credentials' ? (
               <div className="max-w-4xl space-y-5">
-                <h2 className="text-xl font-semibold text-cyber-text-primary">平台登录信息</h2>
-                <p className="text-sm text-cyber-text-secondary">Cookie 会保存在后端本地文件，任务运行时按平台和默认档案注入，不在任务列表里明文展示。</p>
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <h2 className="text-xl font-semibold text-cyber-text-primary">平台登录信息</h2>
+                    <p className="mt-2 text-sm text-cyber-text-secondary">Cookie 会保存在后端本地文件，任务运行时按平台和默认档案注入，不在任务列表里明文展示。</p>
+                  </div>
+                  <Button type="button" variant="outline" size="sm" onClick={startNewCredentialProfile}>
+                    <Plus className="h-4 w-4" />
+                    新增
+                  </Button>
+                </div>
                 <div className="grid grid-cols-1 lg:grid-cols-[280px_1fr] gap-5">
                   <div className="space-y-2">
                     {credentials.length ? credentials.map((credential) => (
@@ -2187,6 +2412,48 @@ export function VideoWorkspace() {
                         选择左侧档案可查看当前保存摘要；点击“加载明文”后才会把 Cookie 放入编辑框。
                       </div>
                     )}
+                    {credentialFormProfile ? (
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Button type="button" variant="outline" size="sm" onClick={selfTestCredential} disabled={selfTestingCredential}>
+                          {selfTestingCredential ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                          自测当前配置
+                        </Button>
+                        {credentialSelfTest ? (
+                          <Badge variant={credentialSelfTest.status === 'ok' ? 'success' : credentialSelfTest.status === 'error' ? 'destructive' : 'secondary'}>
+                            self-test {credentialSelfTest.status}
+                          </Badge>
+                        ) : null}
+                      </div>
+                    ) : null}
+                    {credentialSelfTest ? (
+                      <div className="rounded-lg border border-cyber-border-subtle bg-cyber-bg-tertiary/30 p-3 text-xs text-cyber-text-secondary">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="font-medium text-cyber-text-primary">平台配置自测</div>
+                          <Badge variant={credentialSelfTest.status === 'ok' ? 'success' : credentialSelfTest.status === 'error' ? 'destructive' : 'secondary'}>
+                            {credentialSelfTest.status}
+                          </Badge>
+                        </div>
+                        <div className="mt-2">{credentialSelfTest.message}</div>
+                        <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-cyber-text-muted md:grid-cols-4">
+                          <div>任务：{credentialSelfTest.task_id ?? '-'}</div>
+                          <div>耗时：{formatDuration(credentialSelfTest.wall_seconds)}</div>
+                          <div>原始记录：{credentialSelfTest.total_records}</div>
+                          <div>候选：{credentialSelfTest.item_count}</div>
+                        </div>
+                        {credentialSelfTest.error_message ? (
+                          <div className="mt-2 text-red-400">{credentialSelfTest.error_message}</div>
+                        ) : null}
+                        {credentialSelfTest.logs_tail.length ? (
+                          <div className="mt-2 max-h-36 overflow-auto rounded-md border border-cyber-border-subtle bg-cyber-bg-primary/50 p-2 font-mono text-[11px] text-cyber-text-muted">
+                            {credentialSelfTest.logs_tail.map((line, index) => (
+                              <div key={`${credentialSelfTest.task_id ?? 'self-test'}-${index}`} className="break-all">
+                                {line}
+                              </div>
+                            ))}
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
                     <div>
                       <Label className="text-xs">Cookie</Label>
                       <textarea
@@ -2235,19 +2502,6 @@ export function VideoWorkspace() {
                         {startingQrcodeLogin || qrcodeLoginRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : <QrCode className="h-4 w-4" />}
                         扫码登录并保存
                       </Button>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        onClick={() => {
-                          setCredentialFormId('')
-                          setCredentialName('新登录信息')
-                          setCredentialCookies('')
-                          setQrcodeLoginTaskId('')
-                          setQrcodeLoginStatus(null)
-                        }}
-                      >
-                        新增
-                      </Button>
                       <Button type="button" variant="outline" disabled={!credentialFormId} onClick={() => activateCredential(credentialFormId)}>设为平台默认</Button>
                       <Button type="button" variant="destructive" disabled={!credentialFormId} onClick={deleteCredential}>删除</Button>
                     </div>
@@ -2259,8 +2513,16 @@ export function VideoWorkspace() {
 
             {settingsSection === 'api' ? (
               <div className="max-w-3xl space-y-5">
-                <h2 className="text-xl font-semibold text-cyber-text-primary">{uiText.api}</h2>
-                <p className="text-sm text-cyber-text-secondary">{uiText.apiDesc}</p>
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <h2 className="text-xl font-semibold text-cyber-text-primary">{uiText.api}</h2>
+                    <p className="mt-2 text-sm text-cyber-text-secondary">{uiText.apiDesc}</p>
+                  </div>
+                  <Button type="button" variant="outline" size="sm" onClick={createQwenProfile}>
+                    <Plus className="h-4 w-4" />
+                    {uiText.create}
+                  </Button>
+                </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                   <div>
                     <Label className="text-xs">{uiText.profile}</Label>
@@ -2303,7 +2565,13 @@ export function VideoWorkspace() {
                       <SelectTrigger className="h-9 text-xs"><SelectValue /></SelectTrigger>
                       <SelectContent>
                         {QWEN_API_PROVIDER_OPTIONS.map((option) => (
-                          <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                          <SelectItem
+                            key={option.value}
+                            value={option.value}
+                            rightSlot={<span className={scopeBadgeClass(option.scope === 'local')}>{providerScopeLabel(option.scope)}</span>}
+                          >
+                            {option.label}
+                          </SelectItem>
                         ))}
                       </SelectContent>
                     </Select>
@@ -2314,13 +2582,14 @@ export function VideoWorkspace() {
                       <Input
                         value={qwenModel}
                         onChange={(event) => setQwenModel(event.target.value)}
+                        onBlur={() => syncProviderForSelectedModel(qwenModel.trim())}
                         placeholder={uiText.modelName}
                         className="h-9 text-xs"
                       />
                       <Select
-                        value={qwenModelOptions.includes(qwenModel) ? qwenModel : '__custom__'}
+                        value={ALL_QWEN_MODEL_VALUES.has(qwenModel) ? qwenModel : '__custom__'}
                         onValueChange={(value) => {
-                          if (value !== '__custom__') setQwenModel(value)
+                          if (value !== '__custom__') selectKnownQwenModel(value)
                         }}
                       >
                         <SelectTrigger className="h-9 text-xs">
@@ -2328,8 +2597,14 @@ export function VideoWorkspace() {
                         </SelectTrigger>
                         <SelectContent className="max-h-72">
                           <SelectItem value="__custom__">{uiText.customModelInput}</SelectItem>
-                          {qwenModelOptions.map((model) => (
-                            <SelectItem key={model} value={model}>{model}</SelectItem>
+                          {ALL_QWEN_MODEL_OPTIONS.map((model) => (
+                            <SelectItem
+                              key={model.value}
+                              value={model.value}
+                              rightSlot={<span className={scopeBadgeClass(modelHasLocalSource(model))}>{modelScopeLabel(model)}</span>}
+                            >
+                              {model.value}
+                            </SelectItem>
                           ))}
                         </SelectContent>
                       </Select>
@@ -2337,6 +2612,11 @@ export function VideoWorkspace() {
                     <div className="mt-1 text-[11px] text-cyber-text-muted">
                       {uiText.modelHint}
                     </div>
+                    {qwenProfileDirty ? (
+                      <div className="mt-2 rounded-md border border-cyber-neon-orange/40 bg-cyber-neon-orange/10 px-3 py-2 text-[11px] leading-5 text-cyber-neon-orange">
+                        当前编辑尚未保存。新任务会使用下方“当前保存值”；点击保存后，模型和接口配置才会生效。
+                      </div>
+                    ) : null}
                   </div>
                 </div>
                 <div>
@@ -2477,7 +2757,6 @@ export function VideoWorkspace() {
                 </label>
                 <div className="flex flex-wrap gap-2">
                   <Button type="button" onClick={saveQwenProfile}><CheckCircle2 className="h-4 w-4" />{uiText.save}</Button>
-                  <Button type="button" variant="outline" onClick={createQwenProfile}>{uiText.create}</Button>
                   <Button type="button" variant="outline" onClick={activateQwenProfile} disabled={!selectedQwenProfileId}>{uiText.setDefault}</Button>
                   <Button type="button" variant="destructive" onClick={deleteQwenProfile} disabled={qwenProfiles.length <= 1}>{uiText.delete}</Button>
                 </div>
@@ -2490,7 +2769,8 @@ export function VideoWorkspace() {
                 <h2 className="text-xl font-semibold text-cyber-text-primary">基础参数</h2>
                 <p className="text-sm text-cyber-text-secondary">这些参数真实参与任务请求，保存在浏览器本地设置中。</p>
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                  <SettingNumber label="抓取数量" value={taskSettings.maxVideos} min={1} max={200} onChange={(value) => updateDefaults({ maxVideos: value })} />
+                  <SettingNumber label="筛选后数量" value={taskSettings.maxVideos} min={1} max={200} onChange={(value) => updateDefaults({ maxVideos: value })} />
+                  <SettingNumber label="最大抓取上限" value={taskSettings.maxCrawlItems} min={1} max={500} onChange={(value) => updateDefaults({ maxCrawlItems: value })} />
                   <SettingNumber label="抓取并发" value={taskSettings.crawlConcurrency} min={1} max={8} onChange={(value) => updateDefaults({ crawlConcurrency: value })} />
                   <SettingNumber label="最小间隔秒" value={taskSettings.crawlMinSleepSeconds} min={0} max={120} step={0.5} onChange={(value) => updateDefaults({ crawlMinSleepSeconds: value })} />
                   <SettingNumber label="最大间隔秒" value={taskSettings.crawlMaxSleepSeconds} min={0} max={120} step={0.5} onChange={(value) => updateDefaults({ crawlMaxSleepSeconds: value })} />
