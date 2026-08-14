@@ -105,6 +105,7 @@ DEFAULT_QWEN_SETTINGS = {
     "api_provider": "dashscope",
     "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
     "model": "qwen3.5-omni-plus",
+    "local_download_root": "",
     "video_input_mode": "auto",
     "video_upload_backend": "auto",
     "video_fps": 2.0,
@@ -360,6 +361,8 @@ class VideoTask:
     request: VideoSummaryTaskRequest
     task_dir: Path
     raw_data_dir: Path
+    download_root_dir: Path
+    download_data_dir: Path
     status: str = "pending"
     started_at: datetime = field(default_factory=lambda: datetime.now(LOCAL_TZ))
     completed_at: Optional[datetime] = None
@@ -400,6 +403,7 @@ class VideoTask:
             source_mode=self.request.source_mode,
             started_at=self.started_at.isoformat(),
             completed_at=self.completed_at.isoformat() if self.completed_at else None,
+            local_download_dir=str(self.download_root_dir),
             progress_message=self.progress_message,
             download_progress=self.download_progress,
             subtasks=self.subtasks,
@@ -1120,6 +1124,28 @@ class VideoSummaryManager:
             needs_manual_id=True,
         )
 
+    def _task_download_dirs(self, task_id: str, task_dir: Path, raw_data_dir: Path) -> Tuple[Path, Path]:
+        configured_root = self._configured_local_download_root()
+        if not configured_root:
+            return task_dir, raw_data_dir
+        download_root_dir = configured_root / task_id
+        return download_root_dir, download_root_dir / "raw"
+
+    def _configured_local_download_root(self) -> Optional[Path]:
+        settings = self._load_settings(include_secret=False)
+        configured = str(settings.get("local_download_root") or "").strip()
+        if not configured:
+            return None
+        return self._expand_local_path(configured)
+
+    def _expand_local_path(self, value: str) -> Path:
+        cleaned = value.strip().strip("\"'")
+        expanded = os.path.expandvars(os.path.expanduser(cleaned))
+        path = Path(expanded)
+        if not path.is_absolute():
+            path = PROJECT_ROOT / path
+        return path
+
     async def start_task(self, request: VideoSummaryTaskRequest) -> VideoSummaryTaskStatus:
         request = await self._normalize_task_request(request)
         async with self._lock:
@@ -1134,12 +1160,16 @@ class VideoSummaryManager:
             task_dir = TASK_ROOT / task_id
             raw_data_dir = task_dir / "raw"
             raw_data_dir.mkdir(parents=True, exist_ok=True)
+            download_root_dir, download_data_dir = self._task_download_dirs(task_id, task_dir, raw_data_dir)
+            download_data_dir.mkdir(parents=True, exist_ok=True)
 
             task = VideoTask(
                 task_id=task_id,
                 request=request,
                 task_dir=task_dir,
                 raw_data_dir=raw_data_dir,
+                download_root_dir=download_root_dir,
+                download_data_dir=download_data_dir,
                 progress_message="Task queued",
             )
             self._tasks[task_id] = task
@@ -1154,6 +1184,30 @@ class VideoSummaryManager:
             if task:
                 self._tasks[task_id] = task
         return task.to_status() if task else None
+
+    def open_task_download_dir(self, task_id: str) -> Dict[str, str]:
+        task = self._tasks.get(task_id) or self._load_task_from_state(task_id)
+        if not task:
+            raise RuntimeError(f"Video summary task was not found: {task_id}")
+        target_dir = task.download_root_dir
+        if not target_dir.exists():
+            target_dir.mkdir(parents=True, exist_ok=True)
+        self._open_local_directory(target_dir)
+        return {"status": "ok", "path": str(target_dir)}
+
+    def _open_local_directory(self, path: Path) -> None:
+        target = path.resolve()
+        if os.name == "nt":
+            subprocess.Popen(["explorer.exe", str(target)])
+            return
+        if sys.platform == "darwin":
+            subprocess.Popen(["open", str(target)])
+            return
+        subprocess.Popen(
+            ["xdg-open", str(target)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
     async def stop_task(self, task_id: str) -> bool:
         task = self._tasks.get(task_id)
@@ -1207,6 +1261,8 @@ class VideoSummaryManager:
         task.status = "running"
         task.progress_message = "Running MediaCrawler metadata task"
         task.add_log("Video task started")
+        if task.download_data_dir != task.raw_data_dir:
+            task.add_log(f"Local video download directory: {task.download_root_dir}")
         saved_resume_items = [item.model_copy(deep=True) for item in task.items] if task.resume_from_state else []
         self._save_task_state(task, force=True)
         self._start_step(task, "metadata", "检索/加载候选视频元数据", phase="metadata")
@@ -1516,6 +1572,10 @@ class VideoSummaryManager:
             "schema_version": 1,
             "task_id": task.task_id,
             "request": task.request.model_dump(mode="json"),
+            "task_dir": str(task.task_dir),
+            "raw_data_dir": str(task.raw_data_dir),
+            "download_root_dir": str(task.download_root_dir),
+            "download_data_dir": str(task.download_data_dir),
             "status": task.status,
             "started_at": task.started_at.isoformat(),
             "completed_at": task.completed_at.isoformat() if task.completed_at else None,
@@ -1555,11 +1615,23 @@ class VideoSummaryManager:
             request = VideoSummaryTaskRequest.model_validate(data.get("request") or {})
             task_dir = TASK_ROOT / task_id
             raw_data_dir = task_dir / "raw"
+            saved_task_dir = str(data.get("task_dir") or "").strip()
+            saved_raw_data_dir = str(data.get("raw_data_dir") or "").strip()
+            saved_download_root_dir = str(data.get("download_root_dir") or "").strip()
+            saved_download_data_dir = str(data.get("download_data_dir") or "").strip()
+            if saved_task_dir:
+                task_dir = Path(saved_task_dir)
+            if saved_raw_data_dir:
+                raw_data_dir = Path(saved_raw_data_dir)
+            download_root_dir = Path(saved_download_root_dir) if saved_download_root_dir else task_dir
+            download_data_dir = Path(saved_download_data_dir) if saved_download_data_dir else raw_data_dir
             task = VideoTask(
                 task_id=task_id,
                 request=request,
                 task_dir=task_dir,
                 raw_data_dir=raw_data_dir,
+                download_root_dir=download_root_dir,
+                download_data_dir=download_data_dir,
                 status=str(data.get("status") or "error"),
                 started_at=self._parse_task_datetime(data.get("started_at")) or datetime.now(LOCAL_TZ),
                 completed_at=self._parse_task_datetime(data.get("completed_at")),
@@ -1723,6 +1795,7 @@ class VideoSummaryManager:
                 "end": task.request.end_date.isoformat(),
             },
             output_dir=str(task.task_dir),
+            local_download_dir=str(task.download_root_dir),
             total_records=len(records) if records else len(items),
             matched_videos=len(items),
             summarized_videos=sum(1 for item in items if item.summary_status == "completed"),
@@ -2143,9 +2216,16 @@ class VideoSummaryManager:
             except Exception:
                 pass
 
-    def _build_base_crawler_command(self, task: VideoTask, crawler_type: str, enable_get_medias: bool) -> List[str]:
+    def _build_base_crawler_command(
+        self,
+        task: VideoTask,
+        crawler_type: str,
+        enable_get_medias: bool,
+        save_data_path: Optional[Path] = None,
+    ) -> List[str]:
         req = task.request
         crawl_limit = self._task_crawl_limit(task)
+        output_path = save_data_path or task.raw_data_dir
         cmd = [
             "uv",
             "run",
@@ -2160,7 +2240,7 @@ class VideoSummaryManager:
             "--save_data_option",
             "json",
             "--save_data_path",
-            str(task.raw_data_dir),
+            str(output_path),
             "--get_comment",
             "false",
             "--get_sub_comment",
@@ -2226,7 +2306,12 @@ class VideoSummaryManager:
         return cmd
 
     def _build_detail_download_command(self, task: VideoTask, specified_ids: List[str]) -> List[str]:
-        cmd = self._build_base_crawler_command(task, "detail", enable_get_medias=True)
+        cmd = self._build_base_crawler_command(
+            task,
+            "detail",
+            enable_get_medias=True,
+            save_data_path=task.download_data_dir,
+        )
         cmd.extend(["--specified_id", ",".join(specified_ids)])
         return cmd
 
@@ -3392,9 +3477,11 @@ class VideoSummaryManager:
         if exit_code != 0:
             task.add_log(f"Matched video download crawler exited with code {exit_code}; continuing with available files")
 
-        detail_records = self._load_content_records(task.raw_data_dir)
+        detail_records = self._load_content_records(task.download_data_dir)
+        if task.download_data_dir != task.raw_data_dir:
+            detail_records.extend(self._load_content_records(task.raw_data_dir))
         for item in native_items:
-            existing = self._find_existing_video_file(task.raw_data_dir, task.request.platform.value, item.id)
+            existing = self._find_existing_video_file(task.download_data_dir, task.request.platform.value, item.id)
             if existing:
                 self._set_item_video_file_metadata(item, existing)
                 item.video_path = str(existing)
@@ -3468,7 +3555,7 @@ class VideoSummaryManager:
             task.add_log(f"Download unsupported for ranking item {item.id}: {item.error}")
             return
 
-        existing = self._find_existing_video_file(task.raw_data_dir, platform, item.id)
+        existing = self._find_existing_video_file(task.download_data_dir, platform, item.id)
         if existing:
             self._set_item_video_file_metadata(item, existing)
             item.video_path = str(existing)
@@ -3678,7 +3765,7 @@ class VideoSummaryManager:
         referer: str = "",
     ) -> Optional[Path]:
         store_name = PLATFORM_STORE_NAMES.get(platform, platform)
-        target_dir = task.raw_data_dir / store_name / "videos" / str(content_id)
+        target_dir = task.download_data_dir / store_name / "videos" / str(content_id)
         target_dir.mkdir(parents=True, exist_ok=True)
 
         headers = {
@@ -3908,7 +3995,7 @@ class VideoSummaryManager:
             return None
 
         store_name = PLATFORM_STORE_NAMES.get(platform, platform)
-        target_dir = task.raw_data_dir / store_name / "videos" / str(content_id)
+        target_dir = task.download_data_dir / store_name / "videos" / str(content_id)
         target_dir.mkdir(parents=True, exist_ok=True)
         base_headers = self._direct_video_request_headers(task, platform, referer)
 
@@ -6859,6 +6946,7 @@ class VideoSummaryManager:
             else self._infer_api_provider(normalized["base_url"])
         )
         normalized["model"] = str(normalized.get("model") or DEFAULT_QWEN_SETTINGS["model"])
+        normalized["local_download_root"] = str(normalized.get("local_download_root") or "").strip()
         normalized["video_input_mode"] = normalized.get("video_input_mode") if normalized.get("video_input_mode") in VIDEO_INPUT_MODES else "auto"
         normalized["video_upload_backend"] = normalized.get("video_upload_backend") if normalized.get("video_upload_backend") in VIDEO_UPLOAD_BACKENDS else "auto"
         normalized["video_fps"] = float(normalized.get("video_fps") or DEFAULT_QWEN_SETTINGS["video_fps"])
@@ -6914,6 +7002,7 @@ class VideoSummaryManager:
         )
         profile["base_url"] = (request.base_url or DEFAULT_QWEN_SETTINGS["base_url"]).rstrip("/")
         profile["model"] = request.model or DEFAULT_QWEN_SETTINGS["model"]
+        profile["local_download_root"] = (request.local_download_root or "").strip().strip("\"'")
         profile["oss_enabled"] = bool(request.oss_enabled)
         profile["oss_bucket"] = (request.oss_bucket or "").strip()
         profile["oss_endpoint"] = (request.oss_endpoint or "").strip().rstrip("/")
@@ -6936,6 +7025,7 @@ class VideoSummaryManager:
             api_provider=profile["api_provider"],
             base_url=profile["base_url"],
             model=profile["model"],
+            local_download_root=str(profile["local_download_root"]),
             video_input_mode=profile["video_input_mode"],
             video_upload_backend=profile["video_upload_backend"],
             video_fps=float(profile["video_fps"]),
@@ -6969,6 +7059,7 @@ class VideoSummaryManager:
             api_provider=profile["api_provider"],
             base_url=profile["base_url"],
             model=profile["model"],
+            local_download_root=str(profile["local_download_root"]),
             video_input_mode=profile["video_input_mode"],
             video_upload_backend=profile["video_upload_backend"],
             video_fps=float(profile["video_fps"]),

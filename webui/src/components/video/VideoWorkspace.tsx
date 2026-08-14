@@ -7,6 +7,7 @@ import {
   Download,
   Eye,
   EyeOff,
+  FolderOpen,
   KeyRound,
   Loader2,
   Play,
@@ -374,6 +375,13 @@ const VIDEO_WORKSPACE_COPY = {
     commonModel: '常用模型',
     customModelInput: '手动输入',
     modelHint: '模型下拉展示所有常用候选，并标注来源；实际调用链路由上方接口类型与 Base URL 决定，也可以直接输入服务商实际支持的模型名。',
+    localDownloadRoot: '本地下载根目录',
+    localDownloadRootDesc: '留空时使用项目默认 data/video_tasks；填写后，新任务会在该目录下按任务 ID 保存下载视频。',
+    localDownloadRootPlaceholder: '例如 E:\\视频下载\\MediaCrawler',
+    localDownloadRootSaved: '本地下载根目录',
+    defaultDownloadRoot: '项目默认目录',
+    openDownloadDir: '打开下载目录',
+    downloadDir: '下载目录',
     ossUpload: 'OSS 转存上传',
     ossDesc: '启用后，长视频会先上传到 OSS 并用签名 URL 传给模型；未配置完整时自动回到原上传链路。',
     ossCleanup: '分析结束后删除 OSS 临时视频',
@@ -442,6 +450,13 @@ const VIDEO_WORKSPACE_COPY = {
     commonModel: 'Common models',
     customModelInput: 'Custom input',
     modelHint: 'The model menu shows all common candidates with source tags. The actual request path is controlled by API Provider and Base URL, and you can still type any supported model name.',
+    localDownloadRoot: 'Local Download Root',
+    localDownloadRootDesc: 'Leave empty to use project data/video_tasks. When set, new tasks save downloaded videos under this root by task ID.',
+    localDownloadRootPlaceholder: 'Example: E:\\Videos\\MediaCrawler',
+    localDownloadRootSaved: 'Local download root',
+    defaultDownloadRoot: 'Project default',
+    openDownloadDir: 'Open Download Folder',
+    downloadDir: 'Download folder',
     ossUpload: 'OSS Transfer Upload',
     ossDesc: 'When enabled, long videos are uploaded to OSS first and passed to the model as signed URLs. Incomplete config falls back to the existing upload path.',
     ossCleanup: 'Delete OSS temporary videos after analysis',
@@ -1028,6 +1043,7 @@ export function VideoWorkspace() {
   const [qwenApiProvider, setQwenApiProvider] = useState<QwenApiProvider>('dashscope')
   const [qwenBaseUrl, setQwenBaseUrl] = useState('https://dashscope.aliyuncs.com/compatible-mode/v1')
   const [qwenModel, setQwenModel] = useState('qwen3.5-omni-plus')
+  const [qwenLocalDownloadRoot, setQwenLocalDownloadRoot] = useState('')
   const [clearQwenKey, setClearQwenKey] = useState(false)
   const [showQwenApiKey, setShowQwenApiKey] = useState(false)
   const [qwenOssEnabled, setQwenOssEnabled] = useState(false)
@@ -1086,6 +1102,7 @@ export function VideoWorkspace() {
       selectedQwenProfile.api_provider !== qwenApiProvider ||
       selectedQwenProfile.base_url !== qwenBaseUrl ||
       selectedQwenProfile.model !== qwenModel ||
+      (selectedQwenProfile.local_download_root ?? '') !== qwenLocalDownloadRoot ||
       selectedQwenProfile.oss_enabled !== qwenOssEnabled ||
       (selectedQwenProfile.oss_bucket ?? '') !== qwenOssBucket ||
       (selectedQwenProfile.oss_endpoint ?? '') !== qwenOssEndpoint ||
@@ -1105,6 +1122,7 @@ export function VideoWorkspace() {
     qwenApiKey,
     qwenApiProvider,
     qwenBaseUrl,
+    qwenLocalDownloadRoot,
     qwenModel,
     qwenName,
     qwenOssAccessKeyId,
@@ -1287,6 +1305,7 @@ export function VideoWorkspace() {
     setQwenApiProvider(profile.api_provider)
     setQwenBaseUrl(profile.base_url)
     setQwenModel(profile.model)
+    setQwenLocalDownloadRoot(profile.local_download_root ?? '')
     setQwenApiKey('')
     setClearQwenKey(false)
     setShowQwenApiKey(false)
@@ -1383,6 +1402,7 @@ export function VideoWorkspace() {
       setQwenApiProvider(data.api_provider)
       setQwenBaseUrl(data.base_url)
       setQwenModel(data.model)
+      setQwenLocalDownloadRoot(data.local_download_root ?? '')
       setQwenApiKey(data.api_key)
       setClearQwenKey(false)
       setShowQwenApiKey(true)
@@ -1680,6 +1700,19 @@ export function VideoWorkspace() {
     }
   }
 
+  async function openTaskDownloadDir(taskId = actionTaskId || discoveryTaskId) {
+    if (!taskId) {
+      toast.warning('还没有可打开的任务目录')
+      return
+    }
+    try {
+      const { data } = await videoSummaryApi.openTaskDownloadDir(taskId)
+      toast.success(`已请求打开下载目录：${data.path}`)
+    } catch (error) {
+      toast.error(`打开下载目录失败: ${extractErrorMessage(error)}`)
+    }
+  }
+
   function toggleItem(itemId: string, checked: boolean) {
     setSelectedIds((current) => {
       if (checked) return current.includes(itemId) ? current : [...current, itemId]
@@ -1818,6 +1851,7 @@ export function VideoWorkspace() {
         api_provider: qwenApiProvider,
         base_url: qwenBaseUrl,
         model: qwenModel,
+        local_download_root: qwenLocalDownloadRoot.trim(),
         oss_enabled: qwenOssEnabled,
         oss_access_key_id: qwenOssAccessKeyId.trim() || undefined,
         oss_access_key_secret: qwenOssAccessKeySecret.trim() || undefined,
@@ -1851,6 +1885,7 @@ export function VideoWorkspace() {
         api_provider: qwenApiProvider,
         base_url: qwenBaseUrl,
         model: qwenModel,
+        local_download_root: qwenLocalDownloadRoot.trim(),
         oss_enabled: qwenOssEnabled,
         oss_access_key_id: qwenOssAccessKeyId.trim() || undefined,
         oss_access_key_secret: qwenOssAccessKeySecret.trim() || undefined,
@@ -1894,6 +1929,7 @@ export function VideoWorkspace() {
 
   const running = discoveryStatus?.status === 'running' || discoveryStatus?.status === 'pending' || actionStatus?.status === 'running' || actionStatus?.status === 'pending'
   const canResume = !running && ((actionTaskId && actionStatus?.status === 'error') || (discoveryTaskId && discoveryStatus?.status === 'error'))
+  const actionDownloadDir = actionStatus?.local_download_dir || actionStatus?.result?.local_download_dir || actionStatus?.result?.output_dir || ''
 
   return (
     <section className="glass-panel float-panel overflow-hidden animate-slide-up">
@@ -2256,9 +2292,22 @@ export function VideoWorkspace() {
 
           {actionStatus ? (
             <div className="rounded-lg border border-cyber-border-subtle bg-cyber-bg-tertiary/20 p-4 space-y-3">
-              <div className="flex items-center justify-between gap-3">
-                <div className="text-sm font-mono text-cyber-text-primary">{uiText.downloadAnalysisTask}: {actionStatus.task_id}</div>
-                <Badge variant={actionStatus.status === 'completed' ? 'success' : actionStatus.status === 'error' ? 'destructive' : 'running'}>{actionStatus.status}</Badge>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-sm font-mono text-cyber-text-primary">{uiText.downloadAnalysisTask}: {actionStatus.task_id}</div>
+                  {actionDownloadDir ? (
+                    <div className="mt-1 break-all text-[11px] text-cyber-text-muted">
+                      {uiText.downloadDir}: {actionDownloadDir}
+                    </div>
+                  ) : null}
+                </div>
+                <div className="flex flex-shrink-0 items-center gap-2">
+                  <Button type="button" variant="outline" size="sm" onClick={() => void openTaskDownloadDir(actionStatus.task_id)}>
+                    <FolderOpen className="h-3.5 w-3.5" />
+                    {uiText.openDownloadDir}
+                  </Button>
+                  <Badge variant={actionStatus.status === 'completed' ? 'success' : actionStatus.status === 'error' ? 'destructive' : 'running'}>{actionStatus.status}</Badge>
+                </div>
               </div>
               <div className="text-xs text-cyber-text-secondary">{actionStatus.progress_message}</div>
               <div className="text-[11px] text-cyber-text-muted">
@@ -2623,6 +2672,18 @@ export function VideoWorkspace() {
                   <Label className="text-xs">Base URL</Label>
                   <Input value={qwenBaseUrl} onChange={(event) => setQwenBaseUrl(event.target.value)} className="mt-2 h-9 text-xs" />
                 </div>
+                <div>
+                  <Label className="text-xs">{uiText.localDownloadRoot}</Label>
+                  <Input
+                    value={qwenLocalDownloadRoot}
+                    onChange={(event) => setQwenLocalDownloadRoot(event.target.value)}
+                    placeholder={uiText.localDownloadRootPlaceholder}
+                    className="mt-2 h-9 text-xs"
+                  />
+                  <div className="mt-1 text-[11px] leading-5 text-cyber-text-muted">
+                    {uiText.localDownloadRootDesc}
+                  </div>
+                </div>
                 <div className="rounded-lg border border-cyber-border-subtle bg-cyber-bg-tertiary/20 p-3">
                   <label className="flex items-start gap-3 text-xs text-cyber-text-primary">
                     <Checkbox checked={qwenOssEnabled} onCheckedChange={(checked) => setQwenOssEnabled(checked === true)} />
@@ -2720,6 +2781,9 @@ export function VideoWorkspace() {
                         </div>
                         <div className="break-all font-mono text-[11px] text-cyber-text-muted">
                           URL: {selectedQwenProfile.base_url}
+                        </div>
+                        <div className="break-all font-mono text-[11px] text-cyber-text-muted">
+                          {uiText.localDownloadRootSaved}: {selectedQwenProfile.local_download_root || uiText.defaultDownloadRoot}
                         </div>
                         <div className="break-all font-mono text-[11px] text-cyber-text-muted">
                           OSS: {selectedQwenProfile.oss_enabled ? uiText.ossSaved : uiText.ossMissing}

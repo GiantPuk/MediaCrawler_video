@@ -178,6 +178,14 @@ async def get_video_summary_task(task_id: str):
     return status
 
 
+@router.post("/tasks/{task_id}/open-download-dir")
+async def open_video_summary_download_dir(task_id: str):
+    try:
+        return video_summary_manager.open_task_download_dir(task_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.post("/tasks/{task_id}/stop")
 async def stop_video_summary_task(task_id: str):
     if not await video_summary_manager.stop_task(task_id):

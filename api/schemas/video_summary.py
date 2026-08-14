@@ -30,6 +30,7 @@ class QwenSettingsRequest(BaseModel):
     api_provider: VideoAnalysisApiProvider = "dashscope"
     base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     model: str = "qwen3.5-omni-plus"
+    local_download_root: str = ""
     oss_enabled: bool = False
     oss_access_key_id: Optional[str] = None
     oss_access_key_secret: Optional[str] = None
@@ -49,6 +50,7 @@ class QwenSettingsResponse(BaseModel):
     api_provider: VideoAnalysisApiProvider = "dashscope"
     base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     model: str = "qwen3.5-omni-plus"
+    local_download_root: str = ""
     video_input_mode: VideoInputMode = "auto"
     video_upload_backend: VideoUploadBackend = "auto"
     video_fps: float = 2.0
@@ -84,6 +86,7 @@ class QwenProfileResponse(BaseModel):
     api_provider: VideoAnalysisApiProvider = "dashscope"
     base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     model: str = "qwen3.5-omni-plus"
+    local_download_root: str = ""
     video_input_mode: VideoInputMode = "auto"
     video_upload_backend: VideoUploadBackend = "auto"
     video_fps: float = 2.0
@@ -334,6 +337,7 @@ class VideoSummaryResult(BaseModel):
     workflow_mode: VideoTaskWorkflowMode = "full"
     date_range: Dict[str, str]
     output_dir: str
+    local_download_dir: str = ""
     total_records: int = 0
     matched_videos: int = 0
     summarized_videos: int = 0
@@ -349,6 +353,7 @@ class VideoSummaryTaskStatus(BaseModel):
     source_mode: VideoTaskSourceMode = "creator"
     started_at: str
     completed_at: Optional[str] = None
+    local_download_dir: str = ""
     progress_message: str = ""
     download_progress: Optional[VideoDownloadProgress] = None
     subtasks: List[VideoTaskStep] = Field(default_factory=list)

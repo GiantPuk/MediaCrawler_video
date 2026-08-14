@@ -74,6 +74,7 @@ export interface QwenSettings {
   api_provider: 'dashscope' | 'openai_compatible' | 'ollama'
   base_url: string
   model: string
+  local_download_root: string
   video_input_mode: 'auto' | 'video' | 'frames' | 'text_first'
   video_upload_backend: 'auto' | 'oss' | 'dashscope' | 'openai'
   video_fps: number
@@ -99,6 +100,7 @@ export interface QwenSettingsPayload {
   api_provider?: 'dashscope' | 'openai_compatible' | 'ollama'
   base_url: string
   model: string
+  local_download_root?: string
   oss_enabled?: boolean
   oss_access_key_id?: string
   oss_access_key_secret?: string
@@ -119,6 +121,7 @@ export interface QwenProfile {
   api_provider: 'dashscope' | 'openai_compatible' | 'ollama'
   base_url: string
   model: string
+  local_download_root: string
   video_input_mode: 'auto' | 'video' | 'frames' | 'text_first'
   video_upload_backend: 'auto' | 'oss' | 'dashscope' | 'openai'
   video_fps: number
@@ -373,6 +376,7 @@ export interface VideoSummaryResult {
   workflow_mode: 'full' | 'metadata_only' | 'selected_items'
   date_range: Record<string, string>
   output_dir: string
+  local_download_dir: string
   total_records: number
   matched_videos: number
   summarized_videos: number
@@ -388,6 +392,7 @@ export interface VideoSummaryTaskStatus {
   source_mode: 'creator' | 'search' | 'ranking'
   started_at: string
   completed_at: string | null
+  local_download_dir: string
   progress_message: string
   download_progress: VideoDownloadProgress | null
   subtasks: VideoTaskStep[]
@@ -468,6 +473,8 @@ export const videoSummaryApi = {
     api.post<VideoSummaryTaskStatus>('/video-summary/tasks/start', payload),
   getTask: (taskId: string) =>
     api.get<VideoSummaryTaskStatus>(`/video-summary/tasks/${taskId}`),
+  openTaskDownloadDir: (taskId: string) =>
+    api.post<{ status: string; path: string }>(`/video-summary/tasks/${taskId}/open-download-dir`),
   stopTask: (taskId: string) =>
     api.post(`/video-summary/tasks/${taskId}/stop`),
   resumeTask: (taskId: string) =>
