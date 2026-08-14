@@ -334,10 +334,11 @@ const VIDEO_SIZE_KEYS = [
 const VIDEO_SIZE_MB_KEYS = ['video_size_mb', 'size_mb', 'file_size_mb']
 
 const DEFAULT_TASK_SETTINGS = {
-  settingsVersion: 3,
+  settingsVersion: 4,
   maxCrawlItems: 100,
   maxVideos: 20,
   crawlConcurrency: 1,
+  analysisConcurrency: 1,
   crawlMinSleepSeconds: 5,
   crawlMaxSleepSeconds: 15,
   crawlLongPauseEvery: 0,
@@ -1529,6 +1530,8 @@ export function VideoWorkspace() {
     const longPauseMaxSeconds = Math.max(longPauseMinRaw, longPauseMaxRaw)
     const filteredLimit = Math.round(clampNumber(taskSettings.maxVideos, 1, 200, 20))
     const crawlLimit = Math.round(clampNumber(taskSettings.maxCrawlItems, 1, 500, 100))
+    const crawlConcurrency = Math.round(clampNumber(taskSettings.crawlConcurrency, 1, 8, 1))
+    const analysisConcurrency = Math.round(clampNumber(taskSettings.analysisConcurrency, 1, 8, 1))
     return {
       platform,
       creator_id: '',
@@ -1540,7 +1543,8 @@ export function VideoWorkspace() {
       end_date: endDate,
       max_crawl_items: Math.max(crawlLimit, filteredLimit),
       max_videos: filteredLimit,
-      crawl_concurrency: Math.round(clampNumber(taskSettings.crawlConcurrency, 1, 8, 1)),
+      crawl_concurrency: crawlConcurrency,
+      analysis_concurrency: analysisConcurrency,
       headless: taskSettings.headless,
       crawl_sleep_seconds: crawlMaxSeconds,
       crawl_min_sleep_seconds: crawlMinSeconds,
@@ -2959,6 +2963,7 @@ export function VideoWorkspace() {
                   <SettingNumber label="筛选后数量" value={taskSettings.maxVideos} min={1} max={200} onChange={(value) => updateDefaults({ maxVideos: value })} />
                   <SettingNumber label="最大抓取上限" value={taskSettings.maxCrawlItems} min={1} max={500} onChange={(value) => updateDefaults({ maxCrawlItems: value })} />
                   <SettingNumber label="抓取并发" value={taskSettings.crawlConcurrency} min={1} max={8} onChange={(value) => updateDefaults({ crawlConcurrency: value })} />
+                  <SettingNumber label="分析并发" value={taskSettings.analysisConcurrency} min={1} max={8} onChange={(value) => updateDefaults({ analysisConcurrency: value })} />
                   <SettingNumber label="最小间隔秒" value={taskSettings.crawlMinSleepSeconds} min={0} max={120} step={0.5} onChange={(value) => updateDefaults({ crawlMinSleepSeconds: value })} />
                   <SettingNumber label="最大间隔秒" value={taskSettings.crawlMaxSleepSeconds} min={0} max={120} step={0.5} onChange={(value) => updateDefaults({ crawlMaxSleepSeconds: value })} />
                   <SettingNumber label="每 N 条长暂停" value={taskSettings.crawlLongPauseEvery} min={0} max={1000} onChange={(value) => updateDefaults({ crawlLongPauseEvery: value })} />

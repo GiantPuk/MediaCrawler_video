@@ -198,7 +198,7 @@ The top-right settings page contains:
 
 - Platform credentials: multiple cookie or QR-code profiles, plus login health checks.
 - Video analysis API: Qwen/DashScope API key, model name, Base URL, and OSS settings.
-- Base parameters: crawl intervals, max videos, concurrency, upload backend, frame count, and Whisper settings.
+- Base parameters: crawl intervals, max videos, crawl concurrency, analysis concurrency, upload backend, frame count, and Whisper settings.
 
 ## Configuration
 
@@ -418,7 +418,8 @@ The default upload backend is `auto`. The real execution order is:
 
 ## Risk and Performance Notes
 
-- Keep max concurrency at `1` by default. Increase it only when you want multiple selected videos to process concurrently across download, transcription, OSS, and model analysis.
+- Keep crawl concurrency at `1` by default; it only controls platform discovery/crawling requests.
+- Keep analysis concurrency at `1` by default. Increase it to `2` or `3` only when you want multiple selected videos to process concurrently across download, transcription, OSS, and model analysis.
 - Use randomized min/max sleep intervals and long pauses every N items.
 - Run metadata-only first, then select videos for download or analysis.
 - For sensitive platforms, prefer real Chrome/CDP login state when possible.

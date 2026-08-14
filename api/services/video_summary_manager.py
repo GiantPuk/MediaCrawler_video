@@ -4325,7 +4325,7 @@ class VideoSummaryManager:
     def _analysis_concurrency(self, task: VideoTask, item_count: int) -> int:
         if item_count <= 1:
             return 1
-        requested = int(task.request.crawl_concurrency or 1)
+        requested = int(task.request.analysis_concurrency or 1)
         return max(1, min(requested, item_count, 8))
 
     def _should_prepare_remote_oss_for_model(

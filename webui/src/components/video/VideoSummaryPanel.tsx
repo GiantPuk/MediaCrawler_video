@@ -796,6 +796,7 @@ export function VideoSummaryPanel() {
         max_crawl_items: Math.max(maxCrawlItems, maxVideos, cleanRankingLimit),
         max_videos: effectiveSourceMode === 'ranking' ? Math.max(maxVideos, cleanRankingLimit) : maxVideos,
         crawl_concurrency: 1,
+        analysis_concurrency: 1,
         headless,
         crawl_sleep_seconds: crawlSleepSeconds,
         summarize: workflowMode === 'metadata_only' ? false : summarize,

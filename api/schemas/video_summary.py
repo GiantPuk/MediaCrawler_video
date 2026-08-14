@@ -258,6 +258,7 @@ class VideoSummaryTaskRequest(BaseModel):
     max_crawl_items: int = Field(default=100, ge=1, le=500)
     max_videos: int = Field(default=20, ge=1, le=200)
     crawl_concurrency: int = Field(default=1, ge=1, le=8)
+    analysis_concurrency: int = Field(default=1, ge=1, le=8)
     headless: bool = False
     # Legacy single-value interval kept for older clients. New clients should
     # send crawl_min_sleep_seconds and crawl_max_sleep_seconds.

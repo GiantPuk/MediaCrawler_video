@@ -299,6 +299,7 @@ export interface VideoSummaryTaskPayload {
   max_crawl_items: number
   max_videos: number
   crawl_concurrency: number
+  analysis_concurrency: number
   headless: boolean
   crawl_sleep_seconds: number
   crawl_min_sleep_seconds?: number
