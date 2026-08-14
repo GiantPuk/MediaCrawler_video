@@ -172,7 +172,7 @@ def start_task(
     end_date: str = typer.Option(date.today().isoformat(), "--end-date"),
     max_crawl_items: int = typer.Option(100, "--max-crawl-items", min=1, max=500, help="Raw platform crawl cap before date/video filtering."),
     max_videos: int = typer.Option(20, "--max-videos", min=1, max=200, help="Final candidate count after filtering."),
-    crawl_concurrency: int = typer.Option(1, "--crawl-concurrency", min=1, max=8, help="MediaCrawler request concurrency. Keep 1 for conservative account risk."),
+    crawl_concurrency: int = typer.Option(1, "--crawl-concurrency", min=1, max=8, help="Crawler request concurrency and selected-video analysis concurrency. Keep 1 for conservative account risk."),
     headless: bool = typer.Option(False, "--headless/--headed"),
     crawl_sleep_seconds: float = typer.Option(5.0, "--crawl-sleep-seconds", min=0.0, max=120.0),
     crawl_min_sleep_seconds: Optional[float] = typer.Option(None, "--crawl-min-sleep-seconds", min=0.0, max=120.0),
@@ -185,8 +185,8 @@ def start_task(
         "auto",
         "--video-upload-backend",
         help=(
-            "auto, oss, dashscope, or openai. auto first tries a real source video URL, "
-            "then source-stream-to-OSS when OSS is enabled, then local upload/download paths."
+            "auto, oss, dashscope, or openai. Selected analysis videos are always saved locally; "
+            "auto tries source URL, source-stream OSS when enabled, then local upload or frames."
         ),
     ),
     video_fps: float = typer.Option(2.0, "--video-fps", min=0.1, max=10.0),
@@ -470,7 +470,7 @@ def create_qwen(
     api_provider: str = typer.Option("dashscope", "--api-provider", help="dashscope, openai_compatible, or ollama."),
     base_url: str = typer.Option("https://dashscope.aliyuncs.com/compatible-mode/v1", "--base-url"),
     model: str = typer.Option("qwen3.5-omni-plus", "--model"),
-    oss_enabled: bool = typer.Option(False, "--oss-enabled/--no-oss-enabled", help="Upload local videos to OSS and pass signed URLs to Qwen."),
+    oss_enabled: bool = typer.Option(False, "--oss-enabled/--no-oss-enabled", help="Temporarily upload source streams or local videos to OSS and pass signed URLs to Qwen."),
     oss_access_key_id: str = typer.Option("", "--oss-access-key-id"),
     oss_access_key_id_file: Optional[Path] = typer.Option(None, "--oss-access-key-id-file"),
     oss_access_key_secret: str = typer.Option("", "--oss-access-key-secret"),
@@ -510,7 +510,7 @@ def update_qwen(
     api_provider: str = typer.Option("dashscope", "--api-provider", help="dashscope, openai_compatible, or ollama."),
     base_url: str = typer.Option("https://dashscope.aliyuncs.com/compatible-mode/v1", "--base-url"),
     model: str = typer.Option("qwen3.5-omni-plus", "--model"),
-    oss_enabled: bool = typer.Option(False, "--oss-enabled/--no-oss-enabled", help="Upload local videos to OSS and pass signed URLs to Qwen."),
+    oss_enabled: bool = typer.Option(False, "--oss-enabled/--no-oss-enabled", help="Temporarily upload source streams or local videos to OSS and pass signed URLs to Qwen."),
     oss_access_key_id: str = typer.Option("", "--oss-access-key-id"),
     oss_access_key_id_file: Optional[Path] = typer.Option(None, "--oss-access-key-id-file"),
     oss_access_key_secret: str = typer.Option("", "--oss-access-key-secret"),

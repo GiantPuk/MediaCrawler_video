@@ -71,8 +71,8 @@ Crawler-side behavior prefers upstream MediaCrawler implementations. Direct APIs
 | Resumable tasks | Task state is persisted to `task_state.json`; failed, stopped, or interrupted tasks can be resumed. |
 | Expired link handling | Bilibili download failures trigger a real playurl refresh before retrying. |
 | Multimodal analysis | Qwen/DashScope compatible API support plus Ollama local vision models. The cloud default model is `qwen3.5-omni-plus`; Whisper is disabled by default. |
-| Whisper fusion | Optional openai-whisper through PyTorch. Transcript text is injected into the video-analysis prompt. |
-| OSS transfer | Source streams or local videos can be uploaded to Alibaba Cloud OSS with multipart upload, then passed to models as signed URLs. Temporary objects are removed after analysis by default. |
+| Whisper fusion | Optional openai-whisper through PyTorch. When enabled, every selected video is saved locally and transcribed before model analysis; transcript text is injected into the video-analysis prompt. |
+| OSS transfer | Source streams or local videos can be uploaded to Alibaba Cloud OSS with multipart upload, then passed to models as signed URLs. Source-stream OSS preparation can run in parallel with local download. Temporary objects are removed after analysis by default. |
 | Markdown output | WebUI renders Markdown, tables, and Mermaid mindmaps. |
 | Data browser | Separates search records, ranking records, creator records, content records, comments, and video-analysis results. |
 | CLI | `tools/video_summary_cli.py` covers creator resolution, task start/poll/stop/resume, platform credentials, and Qwen/OSS profiles. |
@@ -237,13 +237,13 @@ Common settings:
 | Base URL | Compatible endpoint. DashScope compatible mode defaults to `https://dashscope.aliyuncs.com/compatible-mode/v1`. |
 | Model | Model name. The UI provides common Qwen choices and also allows manual input. |
 | Video Input Mode | Auto, video-first, frames, or text-first. Auto is recommended. |
-| Whisper | Optional audio transcription whose text is fused into the video prompt. |
+| Whisper | Optional audio transcription. When enabled, every selected video is saved locally and transcribed; transcript text is fused into the video prompt. |
 
 Ollama local mode uses `http://127.0.0.1:11434` and does not require an API key. The current integration uses Ollama's image-input capability: the backend samples video frames with ffmpeg, then sends those frame images plus text context to the local VL model. It does not pass `.mp4` files to Ollama as native video objects.
 
 ### OSS
 
-When OSS is enabled, the backend can temporarily upload a source stream or local video to OSS and pass the signed URL to the model. Keep cleanup enabled to avoid filling the bucket with one-time videos.
+When OSS is enabled, the backend can temporarily upload a source stream or local video to OSS and pass the signed URL to the model. Selected analysis videos are still retained locally; when possible, source-stream OSS preparation runs alongside local download and Whisper. Keep cleanup enabled to avoid filling the bucket with one-time videos.
 
 ### Crawl Pace
 
@@ -409,17 +409,16 @@ The WebUI data browser hides sensitive configuration files and separates search,
 
 The default upload backend is `auto`. The real execution order is:
 
-1. If API Provider is Ollama, local models skip video URL/file upload and use sampled-frame image analysis.
-2. Try passing a source video URL directly to Qwen when it is publicly reachable.
-3. If the source URL requires platform headers and OSS is enabled, stream the source video to OSS with multipart upload, then pass the signed OSS URL to Qwen.
-4. If source URL paths fail, download the video locally.
-5. After local download, try OSS URL, DashScope local video upload, OpenAI-compatible base64 video, or sampled-frame analysis according to the configured model and limits.
-6. If Whisper is enabled, extract audio with ffmpeg and transcribe it using PyTorch-based openai-whisper; the transcript is fused into the model prompt.
-7. If `oss_cleanup_after_analysis` is enabled, delete temporary OSS objects after analysis.
+1. After a video is selected for download and analysis, the backend always saves that video locally. A successful source URL or OSS model input no longer skips local files.
+2. If Whisper is enabled, every selected video extracts audio with ffmpeg and transcribes it using PyTorch-based openai-whisper. If no usable transcript is generated, that item is marked failed.
+3. If OSS is enabled and the model supports video URLs, source-stream OSS preparation can run while local download and Whisper are in progress.
+4. Model input first tries a public source URL. If that fails, it tries the prepared source-stream OSS signed URL, then local-video OSS upload, DashScope local video upload, OpenAI-compatible base64 video, or sampled-frame analysis according to the configured model and limits.
+5. If API Provider is Ollama, local models skip video URL/file upload and use sampled-frame image analysis plus text context.
+6. If `oss_cleanup_after_analysis` is enabled, temporary OSS objects are deleted after analysis; local videos and result files remain.
 
 ## Risk and Performance Notes
 
-- Keep max concurrency at `1` by default.
+- Keep max concurrency at `1` by default. Increase it only when you want multiple selected videos to process concurrently across download, transcription, OSS, and model analysis.
 - Use randomized min/max sleep intervals and long pauses every N items.
 - Run metadata-only first, then select videos for download or analysis.
 - For sensitive platforms, prefer real Chrome/CDP login state when possible.

@@ -473,8 +473,11 @@ export const videoSummaryApi = {
     api.post<VideoSummaryTaskStatus>('/video-summary/tasks/start', payload),
   getTask: (taskId: string) =>
     api.get<VideoSummaryTaskStatus>(`/video-summary/tasks/${taskId}`),
-  openTaskDownloadDir: (taskId: string) =>
-    api.post<{ status: string; path: string }>(`/video-summary/tasks/${taskId}/open-download-dir`),
+  openTaskDownloadDir: (taskId: string, path = '') =>
+    api.post<{ status: string; path: string }>(
+      `/video-summary/tasks/${taskId}/open-download-dir`,
+      path ? { path } : {},
+    ),
   stopTask: (taskId: string) =>
     api.post(`/video-summary/tasks/${taskId}/stop`),
   resumeTask: (taskId: string) =>

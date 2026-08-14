@@ -75,7 +75,7 @@ def infer_data_category(file_path: Path, rel_path: str) -> str:
         return "ranking"
     if any(token in name for token in ("creator_contents", "author", "user", "profile", "up_info", "account")):
         return "creators"
-    if name == "result.json" or any(token in target for token in ("transcript", "subtitle", "summary", "analysis", "comparison", "status")):
+    if name in {"result.json", "result.md"} or any(token in target for token in ("transcript", "subtitle", "summary", "analysis", "comparison", "status")):
         return "analysis"
     if target.startswith("video_tasks/") and "/raw/" not in target:
         return "analysis"

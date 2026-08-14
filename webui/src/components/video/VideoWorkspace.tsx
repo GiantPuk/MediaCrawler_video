@@ -39,6 +39,7 @@ import {
   type QwenProfile,
   type QwenSettings,
   type VideoSummaryItem,
+  type VideoSummaryResult,
   type VideoSummaryTaskPayload,
   type VideoSummaryTaskStatus,
   type VideoTaskStep,
@@ -427,6 +428,11 @@ const VIDEO_WORKSPACE_COPY = {
     downloadAnalysisTask: '下载/分析任务',
     overallSummary: '整体汇总',
     perVideoResults: '分视频结果',
+    markdownResult: 'Markdown 结果',
+    copyMarkdown: '复制 Markdown',
+    downloadMarkdown: '下载 Markdown',
+    markdownUnavailable: '当前还没有可导出的 Markdown 结果',
+    markdownDownloaded: 'Markdown 已开始下载',
     mindmapRenderFailed: '思维导图渲染失败',
     mindmapRendering: '正在渲染思维导图...',
     openLink: '打开',
@@ -502,6 +508,11 @@ const VIDEO_WORKSPACE_COPY = {
     downloadAnalysisTask: 'Download/Analysis Task',
     overallSummary: 'Overall Summary',
     perVideoResults: 'Per-video Results',
+    markdownResult: 'Markdown result',
+    copyMarkdown: 'Copy Markdown',
+    downloadMarkdown: 'Download Markdown',
+    markdownUnavailable: 'No Markdown result is available yet',
+    markdownDownloaded: 'Markdown download started',
     mindmapRenderFailed: 'Mindmap Render Failed',
     mindmapRendering: 'Rendering mindmap...',
     openLink: 'Open',
@@ -750,6 +761,70 @@ function formatDate(value?: string | null) {
   return date.toLocaleString()
 }
 
+function safeMarkdownFilename(value: string) {
+  return value
+    .trim()
+    .replace(/[<>:"/\\|?*\x00-\x1f]/g, '_')
+    .replace(/\s+/g, '_')
+    .slice(0, 120)
+    || 'video-summary'
+}
+
+function buildResultMarkdown(result: VideoSummaryResult) {
+  const lines: string[] = ['# 视频分析结果', '']
+  lines.push(`- 任务 ID: ${result.task_id}`)
+  lines.push(`- 平台: ${result.platform}`)
+  lines.push(`- 来源模式: ${result.source_mode}`)
+  lines.push(`- 时间范围: ${result.date_range?.start || '-'} 至 ${result.date_range?.end || '-'}`)
+  lines.push(`- 匹配视频: ${result.matched_videos}`)
+  lines.push(`- 已总结视频: ${result.summarized_videos}`)
+  if (result.creator_display_name || result.creator_id) lines.push(`- 创作者: ${result.creator_display_name || result.creator_id}`)
+  if (result.search_keyword) lines.push(`- 搜索关键词: ${result.search_keyword}`)
+  if (result.ranking_type) lines.push(`- 榜单类型: ${result.ranking_type}`)
+  if (result.local_download_dir) lines.push(`- 本地下载目录: \`${result.local_download_dir}\``)
+
+  if (result.aggregate_summary?.trim()) {
+    lines.push('', '## 整体汇总', '', result.aggregate_summary.trim())
+  }
+
+  if (result.items?.length) {
+    lines.push('', '## 分视频结果', '')
+    result.items.forEach((item, index) => {
+      lines.push(`### ${index + 1}. ${item.title || item.id}`)
+      const meta = [`ID: ${item.id}`]
+      if (item.published_at) meta.push(`发布时间: ${formatDate(item.published_at)}`)
+      meta.push(`下载状态: ${item.download_status}`)
+      meta.push(`总结状态: ${item.summary_status}`)
+      if (item.analysis_mode !== 'none') meta.push(`分析方式: ${item.analysis_mode}`)
+      lines.push(`- ${meta.join(' · ')}`)
+      if (item.url) lines.push(`- 原始链接: ${item.url}`)
+      if (item.video_path) lines.push(`- 本地视频: \`${item.video_path}\``)
+      if (item.summary?.trim()) lines.push('', '#### 摘要', '', item.summary.trim())
+      if (item.error?.trim()) lines.push('', '#### 错误', '', item.error.trim())
+      lines.push('')
+    })
+  }
+
+  return `${lines.join('\n').trim()}\n`
+}
+
+function resultMarkdownFilename(result: VideoSummaryResult) {
+  const subject = result.search_keyword || result.creator_display_name || result.ranking_type || result.task_id
+  return `${safeMarkdownFilename(`${result.platform}_${subject}_${result.task_id}`)}.md`
+}
+
+function downloadMarkdownFile(filename: string, content: string) {
+  const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = filename
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  URL.revokeObjectURL(url)
+}
+
 function normalizeMediaUrl(value: unknown) {
   const raw = String(value || '').trim()
   if (!raw) return ''
@@ -805,10 +880,12 @@ function TaskStepTimeline({ steps, copy }: { steps: VideoTaskStep[]; copy: Video
         <div className="text-[11px] font-mono font-semibold text-cyber-text-primary">{copy.subtaskProgress}</div>
         <div className="text-[10px] text-cyber-text-muted">{steps.length} {copy.stepUnit}</div>
       </div>
-      <div className="max-h-64 space-y-2 overflow-y-auto pr-1">
+      <div className="max-h-96 space-y-2 overflow-y-auto pr-1">
         {steps.map((step) => {
           const percent = step.progress_percent ?? (step.status === 'completed' ? 100 : 0)
           const hasTotal = step.total_bytes !== null && step.total_bytes > 0
+          const hasTransferred = step.transferred_bytes > 0
+          const showBytes = hasTotal || hasTransferred || ['download', 'upload', 'transcribe'].includes(step.phase)
           return (
             <div key={step.id} className="rounded-md border border-cyber-border-subtle bg-cyber-bg-secondary/40 p-2">
               <div className="flex items-start justify-between gap-2">
@@ -828,7 +905,7 @@ function TaskStepTimeline({ steps, copy }: { steps: VideoTaskStep[]; copy: Video
                     <div className="h-full bg-cyber-neon-cyan transition-all" style={{ width: `${Math.min(100, Math.max(0, percent))}%` }} />
                   </div>
                   <div className="grid grid-cols-2 gap-2 text-[10px] text-cyber-text-muted md:grid-cols-3">
-                    <span>{hasTotal ? `${formatByteSize(step.transferred_bytes)} / ${formatByteSize(step.total_bytes)}` : formatByteSize(step.transferred_bytes || null)}</span>
+                    <span>{showBytes ? (hasTotal ? `${formatByteSize(step.transferred_bytes)} / ${formatByteSize(step.total_bytes)}` : formatByteSize(step.transferred_bytes || null)) : '无字节统计'}</span>
                     <span>{step.progress_percent !== null ? `${step.progress_percent.toFixed(1)}%` : '-'}</span>
                     <span>{formatSpeed(step.speed_bps)}</span>
                   </div>
@@ -1700,15 +1777,24 @@ export function VideoWorkspace() {
     }
   }
 
-  async function openTaskDownloadDir(taskId = actionTaskId || discoveryTaskId) {
-    if (!taskId) {
+  async function openTaskDownloadDir(taskId?: string, downloadDir?: string) {
+    const targetTaskId = taskId || actionTaskId || discoveryTaskId
+    const fallbackDownloadDir = downloadDir
+      || actionStatus?.local_download_dir
+      || actionStatus?.result?.local_download_dir
+      || actionStatus?.result?.output_dir
+      || ''
+    if (!targetTaskId) {
       toast.warning('还没有可打开的任务目录')
       return
     }
     try {
-      const { data } = await videoSummaryApi.openTaskDownloadDir(taskId)
+      const { data } = await videoSummaryApi.openTaskDownloadDir(targetTaskId, fallbackDownloadDir)
       toast.success(`已请求打开下载目录：${data.path}`)
     } catch (error) {
+      if (fallbackDownloadDir) {
+        await copyToClipboard(fallbackDownloadDir, '下载目录')
+      }
       toast.error(`打开下载目录失败: ${extractErrorMessage(error)}`)
     }
   }
@@ -1930,6 +2016,31 @@ export function VideoWorkspace() {
   const running = discoveryStatus?.status === 'running' || discoveryStatus?.status === 'pending' || actionStatus?.status === 'running' || actionStatus?.status === 'pending'
   const canResume = !running && ((actionTaskId && actionStatus?.status === 'error') || (discoveryTaskId && discoveryStatus?.status === 'error'))
   const actionDownloadDir = actionStatus?.local_download_dir || actionStatus?.result?.local_download_dir || actionStatus?.result?.output_dir || ''
+  const actionResultMarkdown = useMemo(
+    () => (actionStatus?.result ? buildResultMarkdown(actionStatus.result) : ''),
+    [actionStatus?.result],
+  )
+  const actionResultMarkdownFilename = useMemo(
+    () => (actionStatus?.result ? resultMarkdownFilename(actionStatus.result) : 'video-summary.md'),
+    [actionStatus?.result],
+  )
+
+  async function copyResultMarkdown() {
+    if (!actionResultMarkdown.trim()) {
+      toast.warning(uiText.markdownUnavailable)
+      return
+    }
+    await copyToClipboard(actionResultMarkdown, uiText.markdownResult)
+  }
+
+  function downloadResultMarkdown() {
+    if (!actionResultMarkdown.trim()) {
+      toast.warning(uiText.markdownUnavailable)
+      return
+    }
+    downloadMarkdownFile(actionResultMarkdownFilename, actionResultMarkdown)
+    toast.success(uiText.markdownDownloaded)
+  }
 
   return (
     <section className="glass-panel float-panel overflow-hidden animate-slide-up">
@@ -2301,8 +2412,20 @@ export function VideoWorkspace() {
                     </div>
                   ) : null}
                 </div>
-                <div className="flex flex-shrink-0 items-center gap-2">
-                  <Button type="button" variant="outline" size="sm" onClick={() => void openTaskDownloadDir(actionStatus.task_id)}>
+                <div className="flex flex-shrink-0 flex-wrap items-center justify-end gap-2">
+                  {actionStatus.result ? (
+                    <>
+                      <Button type="button" variant="outline" size="sm" onClick={() => void copyResultMarkdown()} disabled={!actionResultMarkdown.trim()}>
+                        <Copy className="h-3.5 w-3.5" />
+                        {uiText.copyMarkdown}
+                      </Button>
+                      <Button type="button" variant="outline" size="sm" onClick={downloadResultMarkdown} disabled={!actionResultMarkdown.trim()}>
+                        <Download className="h-3.5 w-3.5" />
+                        {uiText.downloadMarkdown}
+                      </Button>
+                    </>
+                  ) : null}
+                  <Button type="button" variant="outline" size="sm" onClick={() => void openTaskDownloadDir(actionStatus.task_id, actionDownloadDir)}>
                     <FolderOpen className="h-3.5 w-3.5" />
                     {uiText.openDownloadDir}
                   </Button>
@@ -2320,7 +2443,7 @@ export function VideoWorkspace() {
               ) : null}
               <TaskStepTimeline steps={actionStatus.subtasks ?? []} copy={uiText} />
               {actionStatus.result?.aggregate_summary ? (
-                <div className="max-h-[38rem] overflow-y-auto rounded-md border border-cyber-neon-cyan/30 bg-cyber-neon-cyan/10 p-4 text-xs text-cyber-text-primary">
+                <div className="max-h-[56rem] overflow-y-auto rounded-md border border-cyber-neon-cyan/30 bg-cyber-neon-cyan/10 p-4 text-xs text-cyber-text-primary">
                   <div className="mb-2 text-[11px] font-mono font-semibold text-cyber-neon-cyan">{uiText.overallSummary}</div>
                   <MarkdownResult content={actionStatus.result.aggregate_summary} copy={uiText} />
                 </div>
@@ -2328,7 +2451,7 @@ export function VideoWorkspace() {
               {actionStatus.result?.items?.some((item) => item.summary || item.error) ? (
                 <div className="rounded-md border border-cyber-border-subtle bg-cyber-bg-tertiary/30 p-3">
                   <div className="mb-2 text-[11px] font-mono font-semibold text-cyber-text-primary">{uiText.perVideoResults}</div>
-                  <div className="max-h-96 space-y-3 overflow-y-auto pr-1">
+                  <div className="max-h-[56rem] space-y-3 overflow-y-auto pr-1">
                     {actionStatus.result.items.map((item) => (
                       <article key={item.id} className="rounded-md border border-cyber-border-subtle bg-cyber-bg-secondary/40 p-3">
                         <div className="mb-2 flex items-start justify-between gap-2">

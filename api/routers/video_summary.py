@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from typing import Any
+
+from fastapi import APIRouter, Body, HTTPException
 
 from ..schemas.video_summary import (
     CreatorResolveRequest,
@@ -179,9 +181,10 @@ async def get_video_summary_task(task_id: str):
 
 
 @router.post("/tasks/{task_id}/open-download-dir")
-async def open_video_summary_download_dir(task_id: str):
+async def open_video_summary_download_dir(task_id: str, payload: dict[str, Any] | None = Body(default=None)):
     try:
-        return video_summary_manager.open_task_download_dir(task_id)
+        requested_path = str((payload or {}).get("path") or "").strip()
+        return video_summary_manager.open_task_download_dir(task_id, requested_path=requested_path)
     except RuntimeError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

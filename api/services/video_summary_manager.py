@@ -123,6 +123,7 @@ DEFAULT_QWEN_SETTINGS = {
     "oss_cleanup_after_analysis": True,
 }
 QWEN_PROFILE_FIELDS = set(DEFAULT_QWEN_SETTINGS)
+QWEN_SECRET_FIELDS = {"api_key", "oss_access_key_id", "oss_access_key_secret"}
 QWEN_API_PROVIDERS = {"dashscope", "openai_compatible", "ollama"}
 VIDEO_UPLOAD_BACKENDS = {"auto", "oss", "dashscope", "openai"}
 
@@ -377,6 +378,7 @@ class VideoTask:
     subtasks: List[VideoTaskStep] = field(default_factory=list)
     records: List[Dict[str, Any]] = field(default_factory=list)
     items: List[VideoSummaryItem] = field(default_factory=list)
+    qwen_settings_snapshot: Dict[str, Any] = field(default_factory=dict)
     resume_from_state: bool = False
     last_state_save_at: float = 0.0
 
@@ -1171,6 +1173,7 @@ class VideoSummaryManager:
                 download_root_dir=download_root_dir,
                 download_data_dir=download_data_dir,
                 progress_message="Task queued",
+                qwen_settings_snapshot=self._qwen_settings_snapshot(),
             )
             self._tasks[task_id] = task
             self._save_task_state(task, force=True)
@@ -1185,12 +1188,29 @@ class VideoSummaryManager:
                 self._tasks[task_id] = task
         return task.to_status() if task else None
 
-    def open_task_download_dir(self, task_id: str) -> Dict[str, str]:
+    def open_task_download_dir(self, task_id: str, requested_path: str = "") -> Dict[str, str]:
         task = self._tasks.get(task_id) or self._load_task_from_state(task_id)
-        if not task:
+        target_dir: Optional[Path] = None
+        can_create = False
+        if task:
+            target_dir = task.download_root_dir
+            can_create = True
+        else:
+            result = self._load_result(task_id)
+            if result:
+                result_dir = str(result.local_download_dir or result.output_dir or "").strip()
+                if result_dir:
+                    target_dir = self._expand_local_path(result_dir)
+                    can_create = True
+        if not target_dir and requested_path:
+            target_dir = self._expand_local_path(requested_path)
+        if not target_dir:
             raise RuntimeError(f"Video summary task was not found: {task_id}")
-        target_dir = task.download_root_dir
+        if target_dir.exists() and not target_dir.is_dir():
+            raise RuntimeError(f"Download path is not a directory: {target_dir}")
         if not target_dir.exists():
+            if not can_create:
+                raise RuntimeError(f"Download directory does not exist: {target_dir}")
             target_dir.mkdir(parents=True, exist_ok=True)
         self._open_local_directory(target_dir)
         return {"status": "ok", "path": str(target_dir)}
@@ -1425,10 +1445,14 @@ class VideoSummaryManager:
             task.result = result
             task.completed_at = datetime.now(LOCAL_TZ)
             failed_downloads = [item for item in items if item.download_status == "failed" and not item.video_path]
+            failed_summaries = [item for item in items if item.summary_status == "failed"]
             completed_summaries = [item for item in items if item.summary_status == "completed"]
-            if items and failed_downloads and not completed_summaries:
+            if items and not completed_summaries and (failed_downloads or failed_summaries):
                 task.status = "error"
-                task.error_message = f"{len(failed_downloads)} selected video download(s) failed."
+                if failed_downloads:
+                    task.error_message = f"{len(failed_downloads)} selected video download(s) failed."
+                else:
+                    task.error_message = f"{len(failed_summaries)} selected video summary task(s) failed."
                 task.progress_message = "Task failed"
             else:
                 task.status = "completed"
@@ -1576,6 +1600,7 @@ class VideoSummaryManager:
             "raw_data_dir": str(task.raw_data_dir),
             "download_root_dir": str(task.download_root_dir),
             "download_data_dir": str(task.download_data_dir),
+            "qwen_settings_snapshot": self._sanitize_qwen_settings_snapshot(task.qwen_settings_snapshot),
             "status": task.status,
             "started_at": task.started_at.isoformat(),
             "completed_at": task.completed_at.isoformat() if task.completed_at else None,
@@ -1638,6 +1663,7 @@ class VideoSummaryManager:
                 progress_message=str(data.get("progress_message") or ""),
                 logs=[str(value) for value in (data.get("logs") or []) if value is not None][-500:],
                 error_message=str(data.get("error_message") or "") or None,
+                qwen_settings_snapshot=self._sanitize_qwen_settings_snapshot(data.get("qwen_settings_snapshot") or {}),
             )
             if task.status in {"pending", "running"}:
                 task.status = "error"
@@ -4274,6 +4300,8 @@ class VideoSummaryManager:
         qwen_label = self._qwen_runtime_label(settings)
         whisper_label = self._whisper_config_label(task)
         task.add_log(f"Video analysis runtime: {qwen_label}; {whisper_label}")
+        if task.request.enable_whisper_transcription:
+            task.add_log("Whisper is enabled; every selected video will be downloaded locally before model analysis")
         if api_provider != "ollama" and not settings.get("api_key"):
             for item in items:
                 item.summary_status = "skipped"
@@ -4281,128 +4309,229 @@ class VideoSummaryManager:
             task.add_log("Qwen API key is not configured; skipped summaries")
             return
 
-        for index, item in enumerate(items, start=1):
-            self._check_cancelled(task)
-            if item.summary_status == "completed" and item.summary:
-                task.add_log(f"Skipping already summarized video {item.id}")
-                continue
-            task.progress_message = f"Summarizing video {index}/{len(items)} with {qwen_label}"
-            try:
-                context_sources = await self._collect_text_sources(task, item)
-                if not item.video_path and video_input_mode in {"auto", "video"}:
-                    try:
-                        source_summary = await self._try_source_url_video_summary(task, settings, item, context_sources)
-                        if source_summary:
-                            item.summary = source_summary
-                            item.summary_status = "completed"
-                            item.analysis_mode = "source_url_video"
-                            item.download_status = "skipped"
-                            item.error = ""
-                            task.add_log(f"Summarized video {item.id} with source URL input")
-                            continue
-                    except Exception as exc:
-                        task.add_log(f"Source URL direct Qwen input failed for {item.id}: {type(exc).__name__}: {exc}")
+        concurrency = self._analysis_concurrency(task, len(items))
+        if concurrency > 1:
+            task.add_log(f"Selected videos will be analyzed with concurrency={concurrency}")
+        semaphore = asyncio.Semaphore(concurrency)
 
-                if not item.video_path and video_input_mode in {"auto", "video"}:
-                    try:
-                        remote_oss_summary = await self._try_remote_oss_video_summary(task, settings, item, context_sources)
-                        if remote_oss_summary:
-                            item.summary = remote_oss_summary
-                            item.summary_status = "completed"
-                            item.analysis_mode = "remote_oss_video"
-                            item.download_status = "skipped"
-                            item.error = ""
-                            task.add_log(f"Summarized video {item.id} with remote stream OSS input")
-                            continue
-                    except Exception as exc:
-                        task.add_log(f"Remote stream OSS Qwen input failed for {item.id}: {type(exc).__name__}: {exc}")
-
-                if self._has_substantial_text_source(context_sources) and not item.video_path and video_input_mode in {"auto", "text_first"}:
-                    await self._summarize_from_text_sources(task, settings, item, context_sources)
-                    continue
-
-                if self._should_try_whisper_transcription(task, context_sources):
-                    try:
-                        transcript = await self._try_whisper_transcription(task, item)
-                        if transcript:
-                            context_sources.append(("Whisper 转录", transcript))
-                    except Exception as exc:
-                        task.add_log(f"Whisper context extraction failed for {item.id}: {type(exc).__name__}: {exc}")
-
-                context_sources = self._dedupe_text_sources(context_sources)
-                if context_sources:
-                    task.add_log(f"Using text context for visual analysis of {item.id}: {', '.join(label for label, _ in context_sources)}")
-
-                if not item.video_path:
-                    if self._has_substantial_text_source(context_sources) and video_input_mode in {"auto", "text_first"}:
-                        await self._summarize_from_text_sources(task, settings, item, context_sources)
-                        continue
-                    await self._ensure_item_video_prepared(task, item)
-
-                if not item.video_path:
-                    item.summary_status = "skipped"
-                    item.error = item.error or "没有可供 Qwen-VL 抽帧分析的本地视频文件。"
-                    continue
-
-                video_path = Path(item.video_path)
-                if not self._local_file_has_video_stream(video_path):
-                    item.video_path = None
-                    item.download_status = "failed"
-                    item.summary_status = "failed"
-                    item.error = "本地媒体文件不是有效视频：未检测到视频流。"
-                    task.add_log(f"Skipping video analysis for {item.id}: local media has no video stream")
-                    continue
-                task.progress_message = f"Analyzing video {index}/{len(items)} with {qwen_label}"
-                if video_input_mode != "frames":
-                    try:
-                        item.summary, item.analysis_mode = await self._call_qwen_direct_video_summary(task, settings, item, video_path, context_sources)
-                        item.summary_status = "completed"
-                        task.add_log(f"Summarized video {item.id} with {item.analysis_mode} input")
-                        continue
-                    except Exception as exc:
-                        task.add_log(
-                            f"Direct video input failed for {item.id} using {qwen_label}; falling back to frames: {type(exc).__name__}: {exc}"
-                        )
-
-                frames = await asyncio.to_thread(
-                    self._sample_video_frames,
-                    video_path,
-                    int(settings.get("sample_frames", 8)),
-                )
-                if not frames:
-                    if self._has_substantial_text_source(context_sources):
-                        await self._summarize_from_text_sources(task, settings, item, context_sources)
-                    else:
-                        item.summary_status = "failed"
-                        item.error = "无法从本地视频文件抽取画面。"
-                    continue
-
-                task.progress_message = f"Analyzing sampled frames {index}/{len(items)} with {qwen_label}"
-                frame_step_id = f"qwen_frames:{item.id}"
-                self._start_step(task, frame_step_id, f"Qwen sampled-frame analysis {item.id}", phase="qwen", item_id=item.id, message=qwen_label)
-                try:
-                    item.summary = await self._call_qwen_frame_summary(settings, item, frames, context_sources)
-                    self._finish_step(task, frame_step_id)
-                except Exception as exc:
-                    self._finish_step(task, frame_step_id, status="failed", message=f"{qwen_label}; {type(exc).__name__}: {exc}")
-                    if self._has_substantial_text_source(context_sources):
-                        task.add_log(
-                            f"Sampled-frame analysis failed for {item.id}; "
-                            f"using available text context instead: {type(exc).__name__}: {exc}"
-                        )
-                        await self._summarize_from_text_sources(task, settings, item, context_sources)
-                        continue
-                    raise
-                item.summary_status = "completed"
-                item.analysis_mode = "frames"
-                task.add_log(f"Summarized video {item.id}")
-            except Exception as exc:
-                item.summary_status = "failed"
-                item.error = f"{type(exc).__name__}: {exc}"
-                task.add_log(f"Qwen summary failed for {item.id}: {item.error}")
-            finally:
+        async def worker(index: int, item: VideoSummaryItem) -> None:
+            async with semaphore:
+                await self._summarize_single_item(task, settings, video_input_mode, qwen_label, index, len(items), item)
                 task.items = items
                 self._save_task_state(task, force=True)
+
+        await asyncio.gather(*(worker(index, item) for index, item in enumerate(items, start=1)))
+
+    def _analysis_concurrency(self, task: VideoTask, item_count: int) -> int:
+        if item_count <= 1:
+            return 1
+        requested = int(task.request.crawl_concurrency or 1)
+        return max(1, min(requested, item_count, 8))
+
+    def _should_prepare_remote_oss_for_model(
+        self,
+        settings: Dict[str, Any],
+        video_input_mode: str,
+    ) -> bool:
+        if video_input_mode not in {"auto", "video"}:
+            return False
+        if self._is_ollama_provider(settings):
+            return False
+        backend = str(settings.get("video_upload_backend", DEFAULT_QWEN_SETTINGS["video_upload_backend"]))
+        return backend in {"auto", "oss"} and bool(settings.get("oss_enabled"))
+
+    async def _await_remote_oss_prepare_task(
+        self,
+        task: VideoTask,
+        item: VideoSummaryItem,
+        prepare_task: asyncio.Task[Optional[Dict[str, Any]]],
+    ) -> Optional[Dict[str, Any]]:
+        try:
+            return await prepare_task
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            task.add_log(f"Remote stream OSS preparation failed for {item.id}: {type(exc).__name__}: {exc}")
+            return None
+
+    async def _cleanup_prepared_remote_oss(
+        self,
+        task: VideoTask,
+        settings: Dict[str, Any],
+        item: VideoSummaryItem,
+        prepared: Optional[Dict[str, Any]],
+        source_label: str,
+    ) -> None:
+        if not prepared:
+            return
+        object_key = str(prepared.get("object_key") or "")
+        if object_key:
+            await self._cleanup_oss_object_after_analysis(task, settings, object_key, item.id, source_label)
+
+    async def _cleanup_pending_remote_oss_prepare(
+        self,
+        task: VideoTask,
+        settings: Dict[str, Any],
+        item: VideoSummaryItem,
+        prepare_task: asyncio.Task[Optional[Dict[str, Any]]],
+    ) -> None:
+        prepared = await self._await_remote_oss_prepare_task(task, item, prepare_task)
+        await self._cleanup_prepared_remote_oss(task, settings, item, prepared, "unused remote stream OSS")
+
+    async def _summarize_single_item(
+        self,
+        task: VideoTask,
+        settings: Dict[str, Any],
+        video_input_mode: str,
+        qwen_label: str,
+        index: int,
+        total_items: int,
+        item: VideoSummaryItem,
+    ) -> None:
+        self._check_cancelled(task)
+        if item.summary_status == "completed" and item.summary:
+            task.add_log(f"Skipping already summarized video {item.id}")
+            return
+
+        remote_prepare_task: Optional[asyncio.Task[Optional[Dict[str, Any]]]] = None
+        remote_prepared: Optional[Dict[str, Any]] = None
+        remote_prepared_consumed = False
+        task.progress_message = f"Summarizing video {index}/{total_items} with {qwen_label}"
+        try:
+            context_sources = await self._collect_text_sources(task, item)
+
+            if self._should_prepare_remote_oss_for_model(settings, video_input_mode):
+                remote_prepare_task = asyncio.create_task(
+                    self._prepare_remote_oss_video_for_qwen(task, settings, item)
+                )
+                task.add_log(f"Started remote stream OSS preparation in parallel for {item.id}")
+
+            if not item.video_path:
+                task.progress_message = f"Preparing local video {index}/{total_items} before analysis"
+                await self._ensure_item_video_prepared(task, item)
+
+            if not item.video_path:
+                item.summary_status = "failed"
+                item.error = item.error or "本次任务要求先保存本地视频，但没有可用的本地视频文件。"
+                task.add_log(f"Skipping video analysis for {item.id}: local video is required but unavailable")
+                return
+
+            if task.request.enable_whisper_transcription:
+                try:
+                    transcript = await self._try_whisper_transcription(task, item)
+                    if not transcript:
+                        item.summary_status = "failed"
+                        item.error = "Whisper 已启用，但没有生成可用转录文本。"
+                        task.add_log(f"Whisper transcription produced no usable transcript for {item.id}")
+                        return
+                    context_sources.append(("Whisper 转录", transcript))
+                except Exception as exc:
+                    item.summary_status = "failed"
+                    item.error = f"Whisper 转录失败: {type(exc).__name__}: {exc}"
+                    task.add_log(f"Whisper transcription failed for {item.id}: {type(exc).__name__}: {exc}")
+                    return
+
+            context_sources = self._dedupe_text_sources(context_sources)
+            if context_sources:
+                task.add_log(f"Using text context for visual analysis of {item.id}: {', '.join(label for label, _ in context_sources)}")
+
+            if video_input_mode in {"auto", "video"}:
+                try:
+                    source_summary = await self._try_source_url_video_summary(task, settings, item, context_sources)
+                    if source_summary:
+                        item.summary = source_summary
+                        item.summary_status = "completed"
+                        item.analysis_mode = "source_url_video"
+                        item.error = ""
+                        task.add_log(f"Summarized video {item.id} with source URL input after local video preparation")
+                        return
+                except Exception as exc:
+                    task.add_log(f"Source URL direct Qwen input failed for {item.id}: {type(exc).__name__}: {exc}")
+
+                if remote_prepare_task:
+                    remote_prepared = await self._await_remote_oss_prepare_task(task, item, remote_prepare_task)
+                    remote_prepare_task = None
+                    if remote_prepared:
+                        try:
+                            remote_prepared_consumed = True
+                            remote_oss_summary = await self._call_qwen_prepared_remote_oss_video_summary(
+                                task,
+                                settings,
+                                item,
+                                remote_prepared,
+                                context_sources,
+                            )
+                            if remote_oss_summary:
+                                item.summary = remote_oss_summary
+                                item.summary_status = "completed"
+                                item.analysis_mode = "remote_oss_video"
+                                item.error = ""
+                                task.add_log(f"Summarized video {item.id} with remote stream OSS input")
+                                return
+                        except Exception as exc:
+                            task.add_log(f"Remote stream OSS Qwen input failed for {item.id}: {type(exc).__name__}: {exc}")
+
+            video_path = Path(item.video_path)
+            if not self._local_file_has_video_stream(video_path):
+                item.video_path = None
+                item.download_status = "failed"
+                item.summary_status = "failed"
+                item.error = "本地媒体文件不是有效视频：未检测到视频流。"
+                task.add_log(f"Skipping video analysis for {item.id}: local media has no video stream")
+                return
+            task.progress_message = f"Analyzing video {index}/{total_items} with {qwen_label}"
+            if video_input_mode != "frames":
+                try:
+                    item.summary, item.analysis_mode = await self._call_qwen_direct_video_summary(task, settings, item, video_path, context_sources)
+                    item.summary_status = "completed"
+                    task.add_log(f"Summarized video {item.id} with {item.analysis_mode} input")
+                    return
+                except Exception as exc:
+                    task.add_log(
+                        f"Direct video input failed for {item.id} using {qwen_label}; falling back to frames: {type(exc).__name__}: {exc}"
+                    )
+
+            frames = await asyncio.to_thread(
+                self._sample_video_frames,
+                video_path,
+                int(settings.get("sample_frames", 8)),
+            )
+            if not frames:
+                if self._has_substantial_text_source(context_sources):
+                    await self._summarize_from_text_sources(task, settings, item, context_sources)
+                else:
+                    item.summary_status = "failed"
+                    item.error = "无法从本地视频文件抽取画面。"
+                return
+
+            task.progress_message = f"Analyzing sampled frames {index}/{total_items} with {qwen_label}"
+            frame_step_id = f"qwen_frames:{item.id}"
+            self._start_step(task, frame_step_id, f"Qwen sampled-frame analysis {item.id}", phase="qwen", item_id=item.id, message=qwen_label)
+            try:
+                item.summary = await self._call_qwen_frame_summary(settings, item, frames, context_sources)
+                self._finish_step(task, frame_step_id)
+            except Exception as exc:
+                self._finish_step(task, frame_step_id, status="failed", message=f"{qwen_label}; {type(exc).__name__}: {exc}")
+                if self._has_substantial_text_source(context_sources):
+                    task.add_log(
+                        f"Sampled-frame analysis failed for {item.id}; "
+                        f"using available text context instead: {type(exc).__name__}: {exc}"
+                    )
+                    await self._summarize_from_text_sources(task, settings, item, context_sources)
+                    return
+                raise
+            item.summary_status = "completed"
+            item.analysis_mode = "frames"
+            task.add_log(f"Summarized video {item.id}")
+        except Exception as exc:
+            item.summary_status = "failed"
+            item.error = f"{type(exc).__name__}: {exc}"
+            task.add_log(f"Qwen summary failed for {item.id}: {item.error}")
+        finally:
+            if remote_prepare_task:
+                await self._cleanup_pending_remote_oss_prepare(task, settings, item, remote_prepare_task)
+            elif remote_prepared and not remote_prepared_consumed:
+                await self._cleanup_prepared_remote_oss(task, settings, item, remote_prepared, "unused remote stream OSS")
 
     async def _try_text_first_summary(self, task: VideoTask, settings: Dict[str, Any], item: VideoSummaryItem) -> bool:
         sources = await self._collect_text_sources(task, item)
@@ -4514,9 +4643,7 @@ class VideoSummaryManager:
             return []
 
     def _should_try_whisper_transcription(self, task: VideoTask, sources: List[Tuple[str, str]]) -> bool:
-        if not task.request.enable_whisper_transcription:
-            return False
-        return not self._has_substantial_text_source(sources)
+        return bool(task.request.enable_whisper_transcription)
 
     def _has_substantial_text_source(self, sources: List[Tuple[str, str]]) -> bool:
         for label, text in self._dedupe_text_sources(sources):
@@ -4537,7 +4664,7 @@ class VideoSummaryManager:
     async def _try_whisper_transcription(self, task: VideoTask, item: VideoSummaryItem) -> str:
         self._check_cancelled(task)
         if not item.video_path:
-            task.add_log(f"No substantial text source for {item.id}; preparing video for Whisper transcription")
+            task.add_log(f"Preparing local video for Whisper transcription {item.id}")
             await self._ensure_item_video_prepared(task, item)
         if not item.video_path:
             task.add_log(f"Whisper transcription skipped for {item.id}: no local video file available")
@@ -5078,6 +5205,18 @@ class VideoSummaryManager:
 
     def _runtime_qwen_settings(self, task: VideoTask) -> Dict[str, Any]:
         settings = self._load_settings(include_secret=True)
+        snapshot = self._sanitize_qwen_settings_snapshot(task.qwen_settings_snapshot)
+        if snapshot:
+            snapshot_profile_id = str(snapshot.get("id") or "").strip()
+            if snapshot_profile_id:
+                try:
+                    store = self._load_profile_store(include_secret=True)
+                    settings = dict(self._profile_by_id(store, snapshot_profile_id))
+                except Exception:
+                    settings = self._load_settings(include_secret=True)
+            for key, value in snapshot.items():
+                if key not in QWEN_SECRET_FIELDS:
+                    settings[key] = value
         settings.update(
             {
                 "video_input_mode": task.request.video_input_mode,
@@ -5093,6 +5232,18 @@ class VideoSummaryManager:
         )
         return settings
 
+    def _qwen_settings_snapshot(self) -> Dict[str, Any]:
+        return self._sanitize_qwen_settings_snapshot(self._load_settings(include_secret=False))
+
+    def _sanitize_qwen_settings_snapshot(self, settings: Any) -> Dict[str, Any]:
+        if not isinstance(settings, dict):
+            return {}
+        return {
+            str(key): value
+            for key, value in settings.items()
+            if key not in QWEN_SECRET_FIELDS
+        }
+
     async def _try_source_url_video_summary(
         self,
         task: VideoTask,
@@ -5100,6 +5251,8 @@ class VideoSummaryManager:
         item: VideoSummaryItem,
         context_sources: List[Tuple[str, str]],
     ) -> str:
+        if self._is_ollama_provider(settings):
+            return ""
         if str(settings.get("video_upload_backend", DEFAULT_QWEN_SETTINGS["video_upload_backend"])) != "auto":
             return ""
         candidates = await self._source_video_url_candidates(task, item)
@@ -5287,13 +5440,24 @@ class VideoSummaryManager:
         item: VideoSummaryItem,
         context_sources: List[Tuple[str, str]],
     ) -> str:
-        if str(settings.get("video_upload_backend", DEFAULT_QWEN_SETTINGS["video_upload_backend"])) != "auto":
+        prepared = await self._prepare_remote_oss_video_for_qwen(task, settings, item)
+        if not prepared:
             return ""
+        return await self._call_qwen_prepared_remote_oss_video_summary(task, settings, item, prepared, context_sources)
+
+    async def _prepare_remote_oss_video_for_qwen(
+        self,
+        task: VideoTask,
+        settings: Dict[str, Any],
+        item: VideoSummaryItem,
+    ) -> Optional[Dict[str, Any]]:
+        if str(settings.get("video_upload_backend", DEFAULT_QWEN_SETTINGS["video_upload_backend"])) not in {"auto", "oss"}:
+            return None
         if not bool(settings.get("oss_enabled")):
-            return ""
+            return None
         candidates = await self._source_video_url_candidates(task, item)
         if not candidates:
-            return ""
+            return None
 
         duration_seconds = self._item_duration_seconds(item)
         duration_limit_seconds = self._public_url_video_duration_limit_seconds(settings)
@@ -5303,7 +5467,7 @@ class VideoSummaryManager:
                 f"{duration_seconds / 60:.1f}min exceeds model public URL limit "
                 f"{duration_limit_seconds / 60:.1f}min"
             )
-            return ""
+            return None
 
         platform = task.request.platform.value
         errors: List[str] = []
@@ -5342,28 +5506,19 @@ class VideoSummaryManager:
                     platform,
                     referer,
                 )
-                metadata_extra = {
-                    "oss_object": object_key,
-                    "source_url_host": host,
-                    "source_url_mode": "stream_to_oss",
-                }
                 item.raw["qwen_remote_oss_object"] = object_key
                 item.raw["qwen_source_video_url_host"] = host
-                qwen_step_id = f"qwen_remote_oss:{item.id}"
-                self._start_step(
-                    task,
-                    qwen_step_id,
-                    f"Qwen 读取远程转存 OSS 视频并分析 {item.id}",
-                    phase="qwen",
-                    item_id=item.id,
-                    message=self._qwen_runtime_label(settings),
-                )
-                try:
-                    summary = await self._call_qwen_video_url_summary(settings, item, public_url, context_sources, size_mb, metadata_extra)
-                    self._finish_step(task, qwen_step_id)
-                finally:
-                    await self._cleanup_oss_object_after_analysis(task, settings, object_key, item.id, "remote stream OSS")
-                return summary
+                return {
+                    "public_url": public_url,
+                    "object_key": object_key,
+                    "size_mb": size_mb,
+                    "metadata_extra": {
+                        "oss_object": object_key,
+                        "source_url_host": host,
+                        "source_url_mode": "stream_to_oss",
+                    },
+                    "host": host,
+                }
             except Exception as exc:
                 qwen_step = self._find_step(task, f"qwen_remote_oss:{item.id}")
                 if qwen_step and qwen_step.status == "running":
@@ -5384,7 +5539,38 @@ class VideoSummaryManager:
                     break
         if errors:
             raise RuntimeError("; ".join(errors))
-        return ""
+        return None
+
+    async def _call_qwen_prepared_remote_oss_video_summary(
+        self,
+        task: VideoTask,
+        settings: Dict[str, Any],
+        item: VideoSummaryItem,
+        prepared: Dict[str, Any],
+        context_sources: List[Tuple[str, str]],
+    ) -> str:
+        object_key = str(prepared.get("object_key") or "")
+        public_url = str(prepared.get("public_url") or "")
+        size_mb = float(prepared.get("size_mb") or 0.0)
+        metadata_extra = prepared.get("metadata_extra") if isinstance(prepared.get("metadata_extra"), dict) else {}
+        qwen_step_id = f"qwen_remote_oss:{item.id}"
+        self._start_step(
+            task,
+            qwen_step_id,
+            f"Qwen 读取远程转存 OSS 视频并分析 {item.id}",
+            phase="qwen",
+            item_id=item.id,
+            message=self._qwen_runtime_label(settings),
+        )
+        try:
+            summary = await self._call_qwen_video_url_summary(settings, item, public_url, context_sources, size_mb, metadata_extra)
+            self._finish_step(task, qwen_step_id)
+            return summary
+        except Exception as exc:
+            self._finish_step(task, qwen_step_id, status="failed", message=f"{self._qwen_runtime_label(settings)}; {type(exc).__name__}: {exc}")
+            raise
+        finally:
+            await self._cleanup_oss_object_after_analysis(task, settings, object_key, item.id, "remote stream OSS")
 
     def _stream_remote_video_to_oss(
         self,
@@ -6848,7 +7034,60 @@ class VideoSummaryManager:
         result_path = task.task_dir / "result.json"
         with result_path.open("w", encoding="utf-8") as f:
             json.dump(task.result.model_dump(mode="json"), f, ensure_ascii=False, indent=2)
+        markdown_path = task.task_dir / "result.md"
+        markdown_path.write_text(self._result_to_markdown(task.result), encoding="utf-8")
         self._save_task_state(task, force=True)
+
+    def _result_to_markdown(self, result: VideoSummaryResult) -> str:
+        def platform_value(value: Any) -> str:
+            return str(getattr(value, "value", value) or "")
+
+        lines: List[str] = ["# 视频分析结果", ""]
+        lines.extend(
+            [
+                f"- 任务 ID: {result.task_id}",
+                f"- 平台: {platform_value(result.platform)}",
+                f"- 来源模式: {result.source_mode}",
+                f"- 时间范围: {result.date_range.get('start', '')} 至 {result.date_range.get('end', '')}",
+                f"- 匹配视频: {result.matched_videos}",
+                f"- 已总结视频: {result.summarized_videos}",
+            ]
+        )
+        if result.creator_display_name or result.creator_id:
+            lines.append(f"- 创作者: {result.creator_display_name or result.creator_id}")
+        if result.search_keyword:
+            lines.append(f"- 搜索关键词: {result.search_keyword}")
+        if result.ranking_type:
+            lines.append(f"- 榜单类型: {result.ranking_type}")
+        if result.local_download_dir:
+            lines.append(f"- 本地下载目录: `{result.local_download_dir}`")
+
+        if result.aggregate_summary.strip():
+            lines.extend(["", "## 整体汇总", "", result.aggregate_summary.strip()])
+
+        if result.items:
+            lines.extend(["", "## 分视频结果", ""])
+            for index, item in enumerate(result.items, start=1):
+                lines.append(f"### {index}. {item.title or item.id}")
+                meta = [f"ID: {item.id}"]
+                if item.published_at:
+                    meta.append(f"发布时间: {item.published_at}")
+                meta.append(f"下载状态: {item.download_status}")
+                meta.append(f"总结状态: {item.summary_status}")
+                if item.analysis_mode != "none":
+                    meta.append(f"分析方式: {item.analysis_mode}")
+                lines.append("- " + " · ".join(meta))
+                if item.url:
+                    lines.append(f"- 原始链接: {item.url}")
+                if item.video_path:
+                    lines.append(f"- 本地视频: `{item.video_path}`")
+                if item.summary.strip():
+                    lines.extend(["", "#### 摘要", "", item.summary.strip()])
+                if item.error.strip():
+                    lines.extend(["", "#### 错误", "", item.error.strip()])
+                lines.append("")
+
+        return "\n".join(lines).strip() + "\n"
 
     def _load_settings(self, include_secret: bool = False) -> Dict[str, Any]:
         store = self._load_profile_store(include_secret=include_secret)
