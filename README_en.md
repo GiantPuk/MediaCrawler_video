@@ -431,7 +431,7 @@ The default upload backend is `auto`. The real execution order is:
 For first-time setup, search, download, summary, and CLI usage, read:
 
 ```text
-USER_GUIDE.md
+使用文档.md
 ```
 
 ## Technical Report
@@ -439,7 +439,7 @@ USER_GUIDE.md
 Implementation details, platform coverage, test statistics, and performance estimates are documented in:
 
 ```text
-TECHNICAL_REPORT.md
+技术报告.md
 ```
 
 ## FAQ
