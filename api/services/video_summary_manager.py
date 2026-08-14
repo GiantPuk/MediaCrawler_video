@@ -469,6 +469,7 @@ class VideoSummaryManager:
         self._login_tasks: Dict[str, PlatformLoginTask] = {}
         self._creator_search_cache: Dict[Tuple[str, str], Tuple[float, List[CreatorCandidate]]] = {}
         self._whisper_model_cache: Dict[Tuple[str, ...], Any] = {}
+        self._whisper_transcribe_semaphores: Dict[Tuple[str, int], asyncio.Semaphore] = {}
 
     def get_settings(self) -> QwenSettingsResponse:
         store = self._load_profile_store(include_secret=True)
@@ -1958,6 +1959,27 @@ class VideoSummaryManager:
     def _whisper_runtime_label(self, task: VideoTask, device: str, use_fp16: bool) -> str:
         model = self._normalize_whisper_model_name(task.request.whisper_model)
         return f"openai-whisper model={model}, device={device}, fp16={str(use_fp16).lower()}"
+
+    def _whisper_transcribe_semaphore(self, device: str) -> Tuple[asyncio.Semaphore, int]:
+        limit = self._whisper_concurrency_limit(device)
+        key = (device, limit)
+        semaphore = self._whisper_transcribe_semaphores.get(key)
+        if semaphore is None:
+            semaphore = asyncio.Semaphore(limit)
+            self._whisper_transcribe_semaphores[key] = semaphore
+        return semaphore, limit
+
+    def _whisper_concurrency_limit(self, device: str) -> int:
+        override = str(os.getenv("MEDIACRAWLER_WHISPER_CONCURRENCY") or "").strip()
+        if override:
+            try:
+                return max(1, min(int(override), 4))
+            except ValueError:
+                return 1
+        # openai-whisper keeps a mutable model instance in memory. Serializing
+        # transcription is the most reliable default for CUDA and avoids 8GB GPU
+        # memory thrashing on cards such as RTX 4070.
+        return 1
 
     def _find_step(self, task: VideoTask, step_id: str) -> Optional[VideoTaskStep]:
         for step in task.subtasks:
@@ -3469,7 +3491,6 @@ class VideoSummaryManager:
             self._check_cancelled(task)
             task.progress_message = f"Downloading matched video {index}/{len(items)}"
             await self._attach_or_download_video(task, item, item.raw)
-            task.items = items
             self._save_task_state(task, force=True)
 
         native_items = [
@@ -4419,17 +4440,20 @@ class VideoSummaryManager:
             if task.request.enable_whisper_transcription:
                 try:
                     transcript = await self._try_whisper_transcription(task, item)
-                    if not transcript:
-                        item.summary_status = "failed"
-                        item.error = "Whisper 已启用，但没有生成可用转录文本。"
-                        task.add_log(f"Whisper transcription produced no usable transcript for {item.id}")
-                        return
-                    context_sources.append(("Whisper 转录", transcript))
+                    if transcript:
+                        context_sources.append(("Whisper 转录", transcript))
+                    else:
+                        item.raw["whisper_error"] = "Whisper enabled but produced no usable transcript"
+                        task.add_log(
+                            f"Whisper transcription produced no usable transcript for {item.id}; "
+                            "continuing with visual analysis"
+                        )
                 except Exception as exc:
-                    item.summary_status = "failed"
-                    item.error = f"Whisper 转录失败: {type(exc).__name__}: {exc}"
-                    task.add_log(f"Whisper transcription failed for {item.id}: {type(exc).__name__}: {exc}")
-                    return
+                    item.raw["whisper_error"] = f"{type(exc).__name__}: {exc}"
+                    task.add_log(
+                        f"Whisper transcription failed for {item.id}: {type(exc).__name__}: {exc}; "
+                        "continuing with visual analysis"
+                    )
 
             context_sources = self._dedupe_text_sources(context_sources)
             if context_sources:
@@ -4695,15 +4719,33 @@ class VideoSummaryManager:
         device, use_fp16 = self._torch_whisper_runtime()
         whisper_runtime = self._whisper_runtime_label(task, device, use_fp16)
         task.progress_message = f"Transcribing audio for {item.id} with {whisper_runtime}"
-        task.add_log(f"Whisper transcription runtime for {item.id}: {whisper_runtime}")
+        whisper_semaphore, whisper_limit = self._whisper_transcribe_semaphore(device)
+        if whisper_semaphore.locked():
+            task.add_log(f"Whisper transcription queued for {item.id}: device={device}, concurrency_limit={whisper_limit}")
+        task.add_log(f"Whisper transcription runtime for {item.id}: {whisper_runtime}, concurrency_limit={whisper_limit}")
         transcribe_step_id = f"whisper_transcribe:{item.id}"
-        self._start_step(task, transcribe_step_id, f"Whisper 转录 {item.id}", phase="transcribe", item_id=item.id, message=whisper_runtime)
+        self._start_step(
+            task,
+            transcribe_step_id,
+            f"Whisper 转录 {item.id}",
+            phase="transcribe",
+            item_id=item.id,
+            message=f"{whisper_runtime}; waiting for slot limit={whisper_limit}",
+        )
         try:
-            transcript = await asyncio.to_thread(
-                self._transcribe_audio_with_whisper,
-                audio_path,
-                task.request.whisper_model,
-            )
+            async with whisper_semaphore:
+                self._check_cancelled(task)
+                task.progress_message = f"Transcribing audio for {item.id} with {whisper_runtime}"
+                self._update_step(
+                    task,
+                    transcribe_step_id,
+                    message=f"{whisper_runtime}; running with slot limit={whisper_limit}",
+                )
+                transcript = await asyncio.to_thread(
+                    self._transcribe_audio_with_whisper,
+                    audio_path,
+                    task.request.whisper_model,
+                )
             self._finish_step(task, transcribe_step_id)
         except Exception as exc:
             self._finish_step(task, transcribe_step_id, status="failed", message=f"{type(exc).__name__}: {exc}")

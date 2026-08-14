@@ -71,7 +71,7 @@ MediaCrawler Video Workbench 是在 [NanmiCoder/MediaCrawler](https://github.com
 | 断点续跑 | 任务状态写入 `task_state.json`，失败、停止或后端重启后可继续任务。 |
 | 链接过期处理 | B 站下载失败时会重新解析真实 playurl 后再重试。 |
 | 多模态理解 | 支持 Qwen/DashScope 兼容 API，也支持 Ollama 本地视觉模型；当前云端默认模型为 `qwen3.5-omni-plus`，默认不启用 Whisper。 |
-| Whisper 融合 | 可选 openai-whisper，基于 PyTorch；启用后每条选中视频都会先保存到本地并执行转录，转录文本会融合进视频理解 prompt。 |
+| Whisper 融合 | 可选 openai-whisper，基于 PyTorch；启用后每条选中视频都会先保存到本地并尝试转录，成功后融合进视频理解 prompt。Whisper 转录有独立单并发保护。 |
 | OSS 转存 | 支持源流或本地视频 multipart 上传到阿里云 OSS，使用签名 URL 交给模型；源流 OSS 可与本地下载并行准备，默认分析后清理临时对象。 |
 | Markdown 结果 | 前端支持 Markdown、表格和 Mermaid mindmap 渲染。 |
 | 数据管理 | 区分搜索记录、榜单记录、创作者记录、内容记录、评论记录、视频理解结果。 |
@@ -237,7 +237,7 @@ browser_data/
 | Base URL | 兼容接口地址，DashScope 兼容模式默认 `https://dashscope.aliyuncs.com/compatible-mode/v1`。 |
 | Model | 模型名称，前端提供常用 Qwen 候选，也允许手动输入。 |
 | Video Input Mode | 自动、视频优先、抽帧、文本优先等模式；当前推荐保持自动。 |
-| Whisper | 可选；启用后，勾选分析的每条视频都会保存到本地并尝试转录，转录文本会融合到视频理解 prompt。 |
+| Whisper | 可选；启用后，勾选分析的每条视频都会保存到本地并尝试转录，成功转录文本会融合到视频理解 prompt。 |
 
 Ollama 本地模式使用 `http://127.0.0.1:11434`，不需要 API Key。当前接入的是 Ollama 官方图片输入能力：后端会先用 ffmpeg 对视频抽帧，再把抽帧图片和文本上下文交给本地 VL 模型。它不是把 `.mp4` 作为视频对象直接交给 Ollama。
 
@@ -411,7 +411,7 @@ WebUI 的“数据管理”会隐藏敏感配置文件，并按类别展示搜�
 默认上传后端为 `auto`，真实执行顺序如下：
 
 1. 勾选“下载并分析”后，后端会先确保每条选中视频保存到本地，不再因为源 URL 或 OSS 成功而跳过本地文件。
-2. 如果启用 Whisper，每条选中视频都会用 ffmpeg 提取音频，再用 openai-whisper 基于 PyTorch 转录；没有生成可用转录时，该条视频会标记失败。
+2. 如果启用 Whisper，每条选中视频都会用 ffmpeg 提取音频，再用 openai-whisper 基于 PyTorch 尝试转录；Whisper 成功时融合转录，失败或空音频会在子任务中记录，视频理解继续使用真实视觉输入。
 3. 如果 OSS 已启用且模型支持视频 URL，后端会尽量在本地下载/Whisper 进行时同步准备源流 OSS 转存，减少等待。
 4. 模型输入优先尝试公开源 URL；失败后尝试已准备好的源流 OSS 签名 URL，再按配置尝试本地视频 OSS 上传、DashScope SDK 本地视频上传、OpenAI-compatible base64 视频或抽帧。
 5. 如果 API Provider 是 Ollama，本地模型会跳过视频 URL/视频文件直传，使用本地视频抽帧和文本上下文分析。
@@ -420,7 +420,7 @@ WebUI 的“数据管理”会隐藏敏感配置文件，并按类别展示搜�
 ## 运行建议
 
 - 抓取并发建议保持 `1`，只控制平台检索/爬取请求。
-- 分析并发默认 `1`；需要批量处理时，可提高到 `2` 或 `3`，后端会并行处理多个已勾选视频的下载、转录、OSS 和模型分析。
+- 分析并发默认 `1`；需要批量处理时，可提高到 `2` 或 `3`，后端会并行处理多个已勾选视频的下载、OSS 和模型分析。Whisper 转录默认单独串行，避免多个转录同时抢占同一张 GPU。
 - 使用“最小间隔 / 最大间隔 / 每 N 条长暂停”随机化请求节奏。
 - 先 metadata-only，确认候选后再勾选下载和总结。
 - 对账号敏感平台优先复用真实 Chrome/CDP 登录态；无头模式更方便，但未必更像真人环境。

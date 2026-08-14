@@ -173,7 +173,7 @@ def start_task(
     max_crawl_items: int = typer.Option(100, "--max-crawl-items", min=1, max=500, help="Raw platform crawl cap before date/video filtering."),
     max_videos: int = typer.Option(20, "--max-videos", min=1, max=200, help="Final candidate count after filtering."),
     crawl_concurrency: int = typer.Option(1, "--crawl-concurrency", min=1, max=8, help="Crawler request concurrency only. Keep 1 for conservative account risk."),
-    analysis_concurrency: int = typer.Option(1, "--analysis-concurrency", min=1, max=8, help="Concurrency for selected-video download, Whisper, OSS, and model analysis."),
+    analysis_concurrency: int = typer.Option(1, "--analysis-concurrency", min=1, max=8, help="Concurrency for selected-video download, OSS, and model analysis. Whisper uses a separate single-concurrency guard."),
     headless: bool = typer.Option(False, "--headless/--headed"),
     crawl_sleep_seconds: float = typer.Option(5.0, "--crawl-sleep-seconds", min=0.0, max=120.0),
     crawl_min_sleep_seconds: Optional[float] = typer.Option(None, "--crawl-min-sleep-seconds", min=0.0, max=120.0),
