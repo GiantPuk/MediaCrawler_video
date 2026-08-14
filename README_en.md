@@ -29,14 +29,14 @@ Main capabilities:
 - Produce per-video timeline summaries, aggregate reports, Markdown output, and Mermaid mindmaps.
 - Share the same backend API and task state across WebUI and CLI.
 
-Capabilities that are not stable are reported as `unsupported`, `missing`, or `failed`; topic cards, question cards, and records without usable video links are not shown as downloadable videos.
+Task status keeps candidate, download, upload, transcription, and model-analysis stage details so issues can be inspected from either WebUI or CLI.
 
 ## Table of Contents
 
 - [Overview](#overview)
 - [Relationship With MediaCrawler](#relationship-with-mediacrawler)
 - [Core Capabilities](#core-capabilities)
-- [Platform Status](#platform-status)
+- [Common Platform Entrypoints](#common-platform-entrypoints)
 - [Quick Start](#quick-start)
 - [WebUI Workflow](#webui-workflow)
 - [Configuration](#configuration)
@@ -44,6 +44,7 @@ Capabilities that are not stable are reported as `unsupported`, `missing`, or `f
 - [Data and Results](#data-and-results)
 - [Video Understanding Pipeline](#video-understanding-pipeline)
 - [Risk and Performance Notes](#risk-and-performance-notes)
+- [User Guide](#user-guide)
 - [Technical Report](#technical-report)
 - [FAQ](#faq)
 - [Development Checks](#development-checks)
@@ -68,7 +69,7 @@ Crawler-side behavior prefers upstream MediaCrawler implementations. Direct APIs
 | Candidate selection | Search returns candidates first. The user selects videos before download or analysis. |
 | Download progress | Tracks current video, downloaded bytes, total bytes, speed, percent, step duration, and failure reason. |
 | Resumable tasks | Task state is persisted to `task_state.json`; failed, stopped, or interrupted tasks can be resumed. |
-| Expired link handling | Bilibili download failures trigger a real playurl refresh before retrying. Other platforms do not fake re-signing. |
+| Expired link handling | Bilibili download failures trigger a real playurl refresh before retrying. |
 | Multimodal analysis | Qwen/DashScope compatible API support plus Ollama local vision models. The cloud default model is `qwen3.5-omni-plus`; Whisper is disabled by default. |
 | Whisper fusion | Optional openai-whisper through PyTorch. Transcript text is injected into the video-analysis prompt. |
 | OSS transfer | Source streams or local videos can be uploaded to Alibaba Cloud OSS with multipart upload, then passed to models as signed URLs. Temporary objects are removed after analysis by default. |
@@ -76,19 +77,15 @@ Crawler-side behavior prefers upstream MediaCrawler implementations. Direct APIs
 | Data browser | Separates search records, ranking records, creator records, content records, comments, and video-analysis results. |
 | CLI | `tools/video_summary_cli.py` covers creator resolution, task start/poll/stop/resume, platform credentials, and Qwen/OSS profiles. |
 
-## Platform Status
+## Common Platform Entrypoints
 
-| Platform | Keyword Video Search | Creator Candidate Search | Creator Videos | Rankings | Download | Summary |
-| --- | --- | --- | --- | --- | --- | --- |
-| Bilibili | Implemented and tested | Username candidates with UID/avatar/follower/video count | Implemented and tested | `popular`, `ranking`, `ranking_<region>`, `precious`, `weekly`, `hot_search`; `weekly` usually requires cookies | Implemented and tested, including playurl refresh | Implemented and tested |
-| Xiaohongshu | Tested with valid cookies for `type=video` candidates | Reliable path is profile URL or creator ID | Depends on valid cookies and upstream behavior | No real ranking endpoint wired | Candidates may not include direct URLs; detail/native path is required | Works after local video is available |
-| Douyin | Tested with valid cookies/CDP or standard mode, can return video candidates and playback URLs | Reliable path is profile URL or `sec_user_id` | Depends on valid cookies | `hot_search`, `trending` return hot topics/search terms for further video search | Works when real video URL is available | Works after local video is available |
-| Kuaishou | Tested with valid cookies via upstream signed search API | Reliable path is profile URL or creator ID | Depends on valid cookies; signed REST profile feed is wired | `hot` returns brilliant video-ranking `photoId` candidates | Works when real video URL is available; `photoId`-only items are marked unsupported | Works after local video is available |
-| Weibo | Upstream video search path is retained; depends on valid cookies | Reliable path is profile URL or UID | Depends on valid cookies and upstream behavior | `hot_search`, `hot_gov` return hot terms/topics for further video search | Works when real video URL is available | Works after local video is available |
-| Zhihu | `zvideo` search tested with valid cookies; date range matters | Reliable path is profile URL or creator ID | Zvideo feed is wired, depends on valid cookies | `total`, `zvideo` hot lists; often returns question cards | Stable direct video download not verified | Works after local video is available |
-| Tieba | No real video search/download flow | Not applicable | Not applicable | `hot_topic` returns hot topics only | Not wired | Not wired |
-
-Ranking entries fall into two categories: real video candidates can be downloaded or analyzed; hot terms, topics, and question cards can only be used as follow-up search keywords.
+| Platform | Recommended Input | Common Entrypoints | Download and Summary |
+| --- | --- | --- | --- |
+| Bilibili | Keyword, creator name, UID, space URL | Keyword search, creator candidates, creator videos, popular/region/weekly rankings | Supports playurl parsing, link refresh, download, and summary. |
+| Xiaohongshu | Keyword, creator profile URL, creator ID | Keyword search, creator videos | Can enter the summary pipeline after a video file is available. |
+| Douyin | Keyword, profile URL, `sec_user_id` | Keyword search, creator videos, hot-term follow-up search | Can download and summarize when a real video URL is available. |
+| Kuaishou | Keyword, profile URL, creator ID | Keyword search, creator videos, hot-ranking candidates | Can download and summarize when a real video URL is available. |
+| Weibo | Keyword, profile URL, UID | Video search, creator videos, hot-term follow-up search | Can download and summarize when a real video URL is available. |
 
 ## Quick Start
 
@@ -185,7 +182,7 @@ config/base_config.py
 
 Bilibili supports username-based creator search. When names conflict, the UI shows candidate creator cards first; a concrete UID must be selected before loading videos.
 
-Other platforms are currently more reliable with profile URLs or platform creator IDs. Platforms without stable username search show the expected input method in the UI.
+Other platforms are currently more reliable with profile URLs or platform creator IDs.
 
 ### Ranking Tasks
 
@@ -217,7 +214,7 @@ Cookie profiles and QR-code login both eventually provide cookies for authentica
 The settings page includes a login health check:
 
 - Bilibili calls the real `https://api.bilibili.com/x/web-interface/nav` endpoint and checks `isLogin`.
-- Other platforms currently use low-risk required-key checks and return `warning` when no stable live probe is wired.
+- Other platforms check key cookie fields and show health status plus hints in the settings page.
 
 Sensitive local state is stored in:
 
@@ -416,7 +413,7 @@ The default upload backend is `auto`. The real execution order is:
 2. Try passing a source video URL directly to Qwen when it is publicly reachable.
 3. If the source URL requires platform headers and OSS is enabled, stream the source video to OSS with multipart upload, then pass the signed OSS URL to Qwen.
 4. If source URL paths fail, download the video locally.
-5. After local download, try OSS URL, DashScope local video upload, OpenAI-compatible base64 video, or frame fallback according to the configured model and limits.
+5. After local download, try OSS URL, DashScope local video upload, OpenAI-compatible base64 video, or sampled-frame analysis according to the configured model and limits.
 6. If Whisper is enabled, extract audio with ffmpeg and transcribe it using PyTorch-based openai-whisper; the transcript is fused into the model prompt.
 7. If `oss_cleanup_after_analysis` is enabled, delete temporary OSS objects after analysis.
 
@@ -428,6 +425,14 @@ The default upload backend is `auto`. The real execution order is:
 - For sensitive platforms, prefer real Chrome/CDP login state when possible.
 - Avoid large-scale comment crawling.
 - Use OSS as temporary transfer storage and keep cleanup enabled.
+
+## User Guide
+
+For first-time setup, search, download, summary, and CLI usage, read:
+
+```text
+USER_GUIDE.md
+```
 
 ## Technical Report
 
@@ -441,11 +446,7 @@ TECHNICAL_REPORT.md
 
 ### Why does the aggregate summary sometimes use local aggregation?
 
-If the aggregate model call fails, the API key is missing, or the model returns no usable text, the backend builds a local aggregate from completed per-video summaries and keeps the corresponding status in logs and results.
-
-### Why are some ranking entries not downloadable?
-
-Some platform rankings return hot terms, topics, questions, or `photoId` entries instead of public video URLs. The project marks these entries clearly and provides a follow-up search path.
+If the aggregate model call does not return usable text, or the API key is not configured, the backend builds a local aggregate from completed per-video summaries and keeps the corresponding status in logs and results.
 
 ### Why does Qwen source URL input fail?
 
