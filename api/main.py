@@ -45,6 +45,7 @@ app = FastAPI(
 
 # Get webui static files directory
 WEBUI_DIR = os.path.join(os.path.dirname(__file__), "webui")
+API_BUILD = "2026-08-15-whisper-guard-v2"
 
 # CORS configuration - allow frontend dev server access
 app.add_middleware(
@@ -83,7 +84,7 @@ async def serve_frontend():
 
 @app.get("/api/health")
 async def health_check():
-    return {"status": "ok"}
+    return {"status": "ok", "build": API_BUILD}
 
 
 @app.get("/api/env/check")

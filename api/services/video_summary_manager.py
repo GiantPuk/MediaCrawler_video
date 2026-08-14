@@ -71,6 +71,7 @@ OSS_MULTIPART_THRESHOLD_BYTES = 2 * 1024 * 1024
 OSS_MULTIPART_PART_SIZE_BYTES = 4 * 1024 * 1024
 REMOTE_OSS_MAX_UPLOAD_ATTEMPTS_PER_ITEM = 1
 DEFAULT_WHISPER_MODEL = "turbo"
+VIDEO_SUMMARY_RUNTIME_BUILD = "2026-08-15-whisper-guard-v2"
 OLLAMA_DEFAULT_RUNTIME_PROFILE = {
     "num_ctx": 8192,
     "num_predict": 1200,
@@ -470,6 +471,7 @@ class VideoSummaryManager:
         self._creator_search_cache: Dict[Tuple[str, str], Tuple[float, List[CreatorCandidate]]] = {}
         self._whisper_model_cache: Dict[Tuple[str, ...], Any] = {}
         self._whisper_transcribe_semaphores: Dict[Tuple[str, int], asyncio.Semaphore] = {}
+        self._whisper_model_lock = threading.Lock()
 
     def get_settings(self) -> QwenSettingsResponse:
         store = self._load_profile_store(include_secret=True)
@@ -1282,6 +1284,7 @@ class VideoSummaryManager:
         task.status = "running"
         task.progress_message = "Running MediaCrawler metadata task"
         task.add_log("Video task started")
+        task.add_log(f"VideoSummary runtime build: {VIDEO_SUMMARY_RUNTIME_BUILD}")
         if task.download_data_dir != task.raw_data_dir:
             task.add_log(f"Local video download directory: {task.download_root_dir}")
         saved_resume_items = [item.model_copy(deep=True) for item in task.items] if task.resume_from_state else []
@@ -4322,7 +4325,19 @@ class VideoSummaryManager:
         whisper_label = self._whisper_config_label(task)
         task.add_log(f"Video analysis runtime: {qwen_label}; {whisper_label}")
         if task.request.enable_whisper_transcription:
-            task.add_log("Whisper is enabled; every selected video will be downloaded locally before model analysis")
+            try:
+                whisper_device, _ = self._torch_whisper_runtime()
+                whisper_limit = self._whisper_concurrency_limit(whisper_device)
+                task.add_log(
+                    f"Whisper is enabled; every selected video will be downloaded locally before model analysis; "
+                    f"Whisper concurrency limit={whisper_limit}"
+                )
+            except Exception as exc:
+                task.add_log(
+                    f"Whisper runtime check failed before analysis: {type(exc).__name__}: {exc}; "
+                    "each selected video will still continue with visual analysis if transcription fails"
+                )
+            task.add_log("Whisper failures are recorded and visual Qwen analysis continues with available video/text input")
         if api_provider != "ollama" and not settings.get("api_key"):
             for item in items:
                 item.summary_status = "skipped"
@@ -4718,11 +4733,8 @@ class VideoSummaryManager:
         self._check_cancelled(task)
         device, use_fp16 = self._torch_whisper_runtime()
         whisper_runtime = self._whisper_runtime_label(task, device, use_fp16)
-        task.progress_message = f"Transcribing audio for {item.id} with {whisper_runtime}"
         whisper_semaphore, whisper_limit = self._whisper_transcribe_semaphore(device)
-        if whisper_semaphore.locked():
-            task.add_log(f"Whisper transcription queued for {item.id}: device={device}, concurrency_limit={whisper_limit}")
-        task.add_log(f"Whisper transcription runtime for {item.id}: {whisper_runtime}, concurrency_limit={whisper_limit}")
+        task.progress_message = f"Waiting for Whisper transcription slot for {item.id}"
         transcribe_step_id = f"whisper_transcribe:{item.id}"
         self._start_step(
             task,
@@ -4733,8 +4745,10 @@ class VideoSummaryManager:
             message=f"{whisper_runtime}; waiting for slot limit={whisper_limit}",
         )
         try:
+            task.add_log(f"Whisper transcription waiting for slot for {item.id}: device={device}, concurrency_limit={whisper_limit}")
             async with whisper_semaphore:
                 self._check_cancelled(task)
+                task.add_log(f"Whisper transcription runtime for {item.id}: {whisper_runtime}, concurrency_limit={whisper_limit}")
                 task.progress_message = f"Transcribing audio for {item.id} with {whisper_runtime}"
                 self._update_step(
                     task,
@@ -4841,14 +4855,26 @@ class VideoSummaryManager:
         import whisper  # type: ignore[import-not-found]
 
         device, use_fp16 = self._torch_whisper_runtime()
-        cache_key = ("openai-whisper", model_name, device)
-        model = self._whisper_model_cache.get(cache_key)
-        if model is None:
-            model = whisper.load_model(model_name, device=device)
-            self._whisper_model_cache[cache_key] = model
-
         audio = self._load_whisper_wav_audio(audio_path)
-        result = model.transcribe(audio, fp16=use_fp16)
+        if int(getattr(audio, "size", 0) or 0) < 1600:
+            return ""
+
+        try:
+            with self._whisper_model_lock:
+                cache_key = ("openai-whisper", model_name, device)
+                model = self._whisper_model_cache.get(cache_key)
+                if model is None:
+                    model = whisper.load_model(model_name, device=device)
+                    self._whisper_model_cache[cache_key] = model
+                result = model.transcribe(audio, fp16=use_fp16)
+        finally:
+            if device == "cuda":
+                try:
+                    import torch  # type: ignore[import-not-found]
+
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
         if isinstance(result, dict):
             segments = result.get("segments")
             if isinstance(segments, list):

@@ -22,9 +22,9 @@ const fileIcons: Record<string, typeof FileJson> = {
 
 const fileStyles: Record<string, { icon: string; border: string; badge: string }> = {
   json: {
-    icon: 'text-cyber-neon-yellow',
-    border: 'hover:border-cyber-neon-yellow/50',
-    badge: 'border-cyber-neon-yellow/30 bg-cyber-neon-yellow/10 text-cyber-neon-yellow'
+    icon: 'text-cyber-neon-purple',
+    border: 'hover:border-cyber-neon-purple/50',
+    badge: 'border-cyber-neon-purple/30 bg-cyber-neon-purple/10 text-cyber-neon-purple'
   },
   csv: {
     icon: 'text-cyber-neon-green',
